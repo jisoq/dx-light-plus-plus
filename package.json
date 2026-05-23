@@ -1,0 +1,42 @@
+{
+  "name": "dx-light-plus-plus",
+  "version": "0.1.0",
+  "description": "Unofficial DX Light screen-sync optimization patcher for high-resolution and 21:9 displays",
+  "type": "module",
+  "scripts": {
+    "bridge": "node scripts/dx-light-bridge.cjs",
+    "dev": "vite",
+    "start": "vite",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "lint": "tsc --noEmit",
+    "native:build": "powershell -ExecutionPolicy Bypass -File scripts/build-dxgi-sampler.ps1; powershell -ExecutionPolicy Bypass -File scripts/build-native-sampler.ps1",
+    "native:bench": "node scripts/bench-native-sampler.cjs",
+    "dxlight:patch": "node scripts/patch-dxlight-runtime.cjs apply",
+    "dxlight:patch:restart": "node scripts/patch-dxlight-runtime.cjs apply --restart",
+    "dxlight:verify": "node scripts/patch-dxlight-runtime.cjs verify",
+    "dxlight:rollback": "node scripts/patch-dxlight-runtime.cjs rollback --restart"
+  },
+  "keywords": [
+    "dx-light",
+    "screen-sync",
+    "ambient-light",
+    "ultrawide",
+    "dxgi"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@electron/asar": "^4.2.0",
+    "@types/react": "^18.2.79",
+    "@types/react-dom": "^18.2.25",
+    "@vitejs/plugin-react": "^4.2.1",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.12",
+    "vitest": "^1.6.0"
+  }
+}

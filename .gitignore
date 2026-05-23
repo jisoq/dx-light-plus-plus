@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Local DX Light installations and patched vendor bundles
+vendor-patched/
+vendor/
+**/app.asar
+**/app.asar.*
+**/*.asar
+
+# Native build artifacts
+native/bin/
+*.exe
+*.dll
+*.pdb
+*.obj
+*.lib
+
+# Local tool caches and scratch data
+.tmp/
+.antigravitycli/
+public-release/
+
+# Local runtime logs and private working notes
+*.log
+plan/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# OS/editor noise
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/
