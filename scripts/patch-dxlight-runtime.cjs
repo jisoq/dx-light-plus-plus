@@ -137,6 +137,7 @@ function patchExtractedApp() {
 
 function patchMainBundle(source) {
   let next = source;
+  const hardwarePowerRecoveryPatch = createHardwarePowerRecoveryPatch();
 
   next = replaceOnce(next, /u=\d+,p=40/, `u=${samplingRate},p=40`, "screen sampling constant");
 
@@ -193,8 +194,17 @@ function patchMainBundle(source) {
     next = replaceOnce(
       next,
       /(const DxLightActiveEdgeNumber=\(\)=>\{const e=\(Q\.get\("devices"\)\|\|\[\]\)\.find\(\(e=>e&&e\.isSyncScreen\)\);return 4===Number\(e&&e\.edgeNumber\)\?4:3\};)/,
-      '$1const DxLightForceMaxBrightness=()=>{try{const e=(Q.get("devices")||[]).map((e=>e?{...e,brightnessColor:{...(e.brightnessColor||{}),a:1},whiteBrightValue:100}:e));Q.set("devices",e);const t=new H;Promise.resolve(t.send(255)).catch((e=>R.error("DX Light max brightness failed",e)))}catch(e){R.error("DX Light max brightness failed",e)}};',
+      '$1const DxLightSyncDevices=()=>{const e=Array.isArray(_e)?_e:[],t=Q.get("devices")||[];return e.some((e=>e&&e.isSyncScreen))?e:t};const DxLightReconnectBeforeSync=()=>{try{return Promise.resolve(fe.autoConnect(De)).catch((e=>R.error("DX Light sync reconnect failed",e)))}catch(e){return R.error("DX Light sync reconnect failed",e),Promise.resolve()}};const DxLightForceMaxBrightness=()=>{try{const e=(Q.get("devices")||[]).map((e=>e?{...e,brightnessColor:{...(e.brightnessColor||{}),a:1},whiteBrightValue:100}:e));Q.set("devices",e);const t=new H;Promise.resolve(t.send(255)).catch((e=>R.error("DX Light max brightness failed",e)))}catch(e){R.error("DX Light max brightness failed",e)}};',
       "max brightness helper",
+    );
+  }
+
+  if (!next.includes("DxLightSyncDevices")) {
+    next = replaceOnce(
+      next,
+      /(const DxLightActiveEdgeNumber=\(\)=>\{const e=\(Q\.get\("devices"\)\|\|\[\]\)\.find\(\(e=>e&&e\.isSyncScreen\)\);return 4===Number\(e&&e\.edgeNumber\)\?4:3\};)/,
+      '$1const DxLightSyncDevices=()=>{const e=Array.isArray(_e)?_e:[],t=Q.get("devices")||[];return e.some((e=>e&&e.isSyncScreen))?e:t};const DxLightReconnectBeforeSync=()=>{try{return Promise.resolve(fe.autoConnect(De)).catch((e=>R.error("DX Light sync reconnect failed",e)))}catch(e){return R.error("DX Light sync reconnect failed",e),Promise.resolve()}};',
+      "sync device recovery helper",
     );
   }
 
@@ -219,23 +229,38 @@ function patchMainBundle(source) {
     );
   }
 
-  if (!next.includes("me=!1;DxLightForceMaxBrightness();")) {
+  if (!next.includes("me=!1;DxLightReconnectBeforeSync();DxLightForceMaxBrightness();DxLightRememberSyncIntent();")) {
     next = replaceOnce(
       next,
-      /const Re=\(\)=>\{me=!1;/,
-      "const Re=()=>{me=!1;DxLightForceMaxBrightness();",
-      "sync start max brightness call",
+      /const Re=\(\)=>\{me=!1;(?:DxLightReconnectBeforeSync\(\);)?(?:DxLightForceMaxBrightness\(\);)?(?:DxLightRememberSyncIntent\(\);)?/,
+      "const Re=()=>{me=!1;DxLightReconnectBeforeSync();DxLightForceMaxBrightness();DxLightRememberSyncIntent();",
+      "sync start max brightness and intent capture",
     );
   }
+
+  next = next.replace(
+    /const Re=\(\)=>\{me=!1;(?:DxLightReconnectBeforeSync\(\);)?DxLightForceMaxBrightness\(\);DxLightRememberSyncIntent\(\);/,
+    "const Re=()=>{me=!1;DxLightReconnectBeforeSync();DxLightForceMaxBrightness();DxLightRememberSyncIntent();",
+  );
 
   if (!next.includes("DxLightDashboardStatus")) {
     next = replaceOnce(
       next,
       /let \$e=\[\],Oe=\{\};/,
-      `let $e=[],Oe={};const DxLightDashboardStatus=()=>{const e=Q.get("devices")||[],t=e.find((e=>e&&e.isSyncScreen))||e[0]||null,r=O.getMonitors(),n=DxLightActiveDisplays(),i=Q.get("syncSpeed")?Q.get("syncSpeed"):0;return{patchVersion:"sync-dashboard-v1",capture:{mode:"sequential-edge",displayFilter:"sync-device-display",samplingRate:DxLightCaptureSamplingRate(),intervalMs:DxLightCaptureInterval(i),edgeNumber:DxLightActiveEdgeNumber(),priority:"below-normal",duplicateSuppression:!0,nativeBorderSampler:"planned"},runtime:{syncWorkerRunning:!!ve,mouseWorkerRunning:!!we,lastFrameAt:Oe.t||0,lastFrameAgeMs:Oe.t?Date.now()-Oe.t:null,signature:Oe.sig||null},device:t?{id:t.id,uuid:t.uuid,name:t.name,lampsAmount:t.lampsAmount,displayId:t.displayId,displaySize:t.displaySize,edgeNumber:t.edgeNumber,isSyncScreen:!!t.isSyncScreen,isSwitchOn:!!t.isSwitchOn,version:t.version,type:t.type}:null,monitors:r,activeDisplays:n,settings:{syncSpeed:i,fpsOptimization:Q.get("fpsOptimization")||0,syncColor:Q.get("syncColor")||0,isLightCompression:Q.get("isLightCompression")||0}}},DxLightDashboardApplyProfile=e=>{const r={dxLightCaptureInterval:50,dxLightSamplingRate:${samplingRate},fpsOptimization:1};return Object.keys(r).forEach((e=>Q.set(e,r[e]))),ve&&(Pe(),setTimeout(Re,250)),DxLightDashboardStatus()},DxLightDashboardSetSyncRunning=e=>{const t=!!e,r=O.getMonitors(),n=r[0]&&r[0].displayId,i=(Q.get("devices")||[]).map(((e,r)=>0===r?{...e,isSyncScreen:t,isSwitchOn:!0,syncMode:0,displayId:e.displayId||n||""}:{...e,isSyncScreen:!1}));return Q.set("devices",i),t?Re():Pe(),DxLightDashboardStatus()};`,
+      `let $e=[],Oe={};const DxLightDashboardStatus=()=>{const e=Q.get("devices")||[],t=e.find((e=>e&&e.isSyncScreen))||e[0]||null,r=O.getMonitors(),n=DxLightActiveDisplays(),i=Q.get("syncSpeed")?Q.get("syncSpeed"):0;return{patchVersion:"sync-dashboard-v1",capture:{mode:"native-border",displayFilter:"sync-device-display",samplingRate:DxLightCaptureSamplingRate(),intervalMs:DxLightCaptureInterval(i),edgeNumber:DxLightActiveEdgeNumber(),priority:"below-normal",duplicateSuppression:!0,nativeBorderSampler:"planned"},runtime:{syncWorkerRunning:!!ve,mouseWorkerRunning:!!we,lastFrameAt:Oe.t||0,lastFrameAgeMs:Oe.t?Date.now()-Oe.t:null,signature:Oe.sig||null},device:t?{id:t.id,uuid:t.uuid,name:t.name,lampsAmount:t.lampsAmount,displayId:t.displayId,displaySize:t.displaySize,edgeNumber:t.edgeNumber,isSyncScreen:!!t.isSyncScreen,isSwitchOn:!!t.isSwitchOn,version:t.version,type:t.type}:null,monitors:r,activeDisplays:n,settings:{syncSpeed:i,fpsOptimization:Q.get("fpsOptimization")||0,syncColor:Q.get("syncColor")||0,isLightCompression:Q.get("isLightCompression")||0}}},DxLightDashboardApplyProfile=e=>{const r={dxLightCaptureInterval:50,dxLightSamplingRate:${samplingRate},fpsOptimization:1};return Object.keys(r).forEach((e=>Q.set(e,r[e]))),ve&&(Pe(),setTimeout(Re,250)),DxLightDashboardStatus()},DxLightDashboardSetSyncRunning=e=>{const t=!!e,r=O.getMonitors(),n=r[0]&&r[0].displayId,i=(Q.get("devices")||[]).map(((e,r)=>0===r?{...e,isSyncScreen:t,isSwitchOn:!0,syncMode:0,displayId:e.displayId||n||""}:{...e,isSyncScreen:!1}));return Q.set("devices",i),t?Re():Pe(),DxLightDashboardStatus()};`,
       "dashboard runtime status helpers",
     );
   }
+
+  next = next.replace(
+    /z\(Oe,_e,t,e,n\)/g,
+    "z(Oe,DxLightSyncDevices(),t,e,n)",
+  );
+
+  next = next.replace(
+    /DxLightDashboardSetSyncRunning=e=>\{const t=!!e,r=O\.getMonitors\(\),n=r\[0\]&&r\[0\]\.displayId,i=\(Q\.get\("devices"\)\|\|\[\]\)\.map\(\(\(e,r\)=>0===r\?\{\.\.\.e,isSyncScreen:t,isSwitchOn:!0,syncMode:0,displayId:e\.displayId\|\|n\|\|""\}:\{\.\.\.e,isSyncScreen:!1\}\)\);return Q\.set\("devices",i\),t\?Re\(\):Pe\(\),DxLightDashboardStatus\(\)\}/,
+    'DxLightDashboardSetSyncRunning=e=>{const t=!!e,r=O.getMonitors(),n=r[0]&&r[0].displayId,i=(Q.get("devices")||[]).map(((e,r)=>0===r?{...e,isSyncScreen:t,isSwitchOn:!0,syncMode:0,displayId:e.displayId||n||""}:{...e,isSyncScreen:!1}));return Q.set("devices",i),t?(DxLightRememberSyncIntent(),Re()):(DxLightClearSyncIntent(),Pe()),DxLightDashboardStatus()}',
+  );
 
   next = next.replace(
     /quiet:\{dxLightCaptureInterval:100,dxLightSamplingRate:\d+,fpsOptimization:1\},balanced:\{dxLightCaptureInterval:80,dxLightSamplingRate:\d+,fpsOptimization:1\},responsive:\{dxLightCaptureInterval:50,dxLightSamplingRate:\d+,fpsOptimization:1\}/,
@@ -248,19 +273,20 @@ function patchMainBundle(source) {
 
   next = next.replace(
     /mode:"sequential-edge",displayFilter:/g,
-    'mode:Oe.native&&Oe.native.mode?Oe.native.mode:"sequential-edge",displayFilter:',
+    'mode:Oe.native&&Oe.native.mode?Oe.native.mode:"native-border",displayFilter:',
   );
   next = next.replace(
-    /mode:(?:Oe\.native&&Oe\.native\.mode\?Oe\.native\.mode:)+"sequential-edge",displayFilter:/g,
-    'mode:Oe.native&&Oe.native.mode?Oe.native.mode:"sequential-edge",displayFilter:',
+    /mode:(?:Oe\.native&&Oe\.native\.mode\?Oe\.native\.mode:)+"(?:sequential-edge|native-border)",displayFilter:/g,
+    'mode:Oe.native&&Oe.native.mode?Oe.native.mode:"native-border",displayFilter:',
   );
   next = next.replace(
     /nativeBorderSampler:"planned"/g,
-    'nativeBorderSampler:Oe.native&&Oe.native.backend?Oe.native.backend:"planned",nativeFrameMs:Oe.native&&Oe.native.elapsedMs||null,nativeFallbackReason:Oe.native&&Oe.native.reason||""',
+    'nativeBorderSampler:Oe.native&&Oe.native.backend?Oe.native.backend:"planned",nativeFrameMs:Oe.native&&Oe.native.elapsedMs||null,nativeStatusReason:Oe.native&&Oe.native.reason||""',
   );
+  next = next.replace(/nativeFallbackReason:/g, "nativeStatusReason:");
   next = next.replace(
-    /nativeFallbackReason:Oe\.native&&Oe\.native\.reason\|\|""(?!,contentBoundsActive)/g,
-    'nativeFallbackReason:Oe.native&&Oe.native.reason||"",contentBoundsActive:!!(Oe.native&&Oe.native.contentBoundsActive),contentLeft:Oe.native&&Oe.native.contentLeft||0,contentRight:Oe.native&&Oe.native.contentRight||0',
+    /nativeStatusReason:Oe\.native&&Oe\.native\.reason\|\|""(?!,contentBoundsActive)/g,
+    'nativeStatusReason:Oe.native&&Oe.native.reason||"",contentBoundsActive:!!(Oe.native&&Oe.native.contentBoundsActive),contentLeft:Oe.native&&Oe.native.contentLeft||0,contentRight:Oe.native&&Oe.native.contentRight||0',
   );
 
   if (!next.includes("dxLightSyncDashboard:status")) {
@@ -286,6 +312,65 @@ function patchMainBundle(source) {
     );
   }
 
+  if (!next.includes("DxLightHardwarePowerRecover")) {
+    next = replaceOnce(
+      next,
+      /(Pe=\(\)=>\{if\(ve\)try\{\$e=\[\],Oe=\[\],ve\.postMessage\("exit"\)\}catch\(e\)\{R\.error\(e\)\}\})(?:,DxLightWakeRecover=\(\)=>\{setTimeout\(\(async\(\)=>\{try\{await fe\.autoConnect\(De\);.*?R\.error\("DX Light wake recovery failed",e\)\}\}\),2500\)\})?,Ae=\(\)=>\{/,
+      `$1;${hardwarePowerRecoveryPatch};const Ae=()=>{`,
+      "hardware power recovery helpers",
+    );
+  }
+
+  if (!next.includes("DxLightStartupSyncRequested")) {
+    next = replaceOnce(
+      next,
+      /DxLightClearSyncIntent=\(\)=>\{DxLightLastSyncDevice=null\},DxLightRecoveryDisplayId=/,
+      'DxLightClearSyncIntent=()=>{DxLightLastSyncDevice=null},DxLightStartupSyncRequested=()=>process.argv.slice(1).some((e=>"--startup"===e)),DxLightRecoveryDisplayId=',
+      "startup sync helper",
+    );
+  }
+
+  next = next.replace(
+    /DxLightHardwarePowerRecover=e=>\{clearTimeout\(DxLightHardwareRecoverTimer\),DxLightHardwareRecoverTimer=setTimeout\(\(async\(\)=>\{try\{await fe\.autoConnect\(De\);const e=\(Q\.get\("devices"\)\|\|\[\]\)\.some\(\(e=>e&&e\.isSyncScreen\)\),t=fe\.devices\.some\(\(e=>e&&!0===e\.isSyncScreen\)\);if\(e\|\|t\)return Re\(\),void R\.info\("DX Light hardware power recovery: restarted screen sync"\);if\(DxLightLastSyncDevice&&DxLightRestoreSyncDevice\(\)\)return Pe\(\),setTimeout\(Re,250\),void R\.info\("DX Light hardware power recovery: restored screen sync"\)\}catch\(e\)\{R\.error\("DX Light hardware power recovery failed",e\)\}\}\),2500\)\}/,
+    'DxLightHardwarePowerRecover=e=>{clearTimeout(DxLightHardwareRecoverTimer),DxLightHardwareRecoverTimer=setTimeout((async()=>{try{await fe.autoConnect(De);const t=(Q.get("devices")||[]).some((e=>e&&e.isSyncScreen)),r=fe.devices.some((e=>e&&!0===e.isSyncScreen));if(t||r)return Re(),void R.info("DX Light hardware power recovery: restarted screen sync");if((DxLightLastSyncDevice||"startup"===e&&DxLightStartupSyncRequested())&&DxLightRestoreSyncDevice())return Pe(),setTimeout(Re,250),void R.info("DX Light hardware power recovery: restored screen sync")}catch(e){R.error("DX Light hardware power recovery failed",e)}}),2500)}',
+  );
+
+  if (!next.includes('DxLightHardwarePowerRecover("usb-attach")')) {
+    next = replaceOnce(
+      next,
+      /await fe\.autoConnect\(De\)\)\}\),1500\)\}\)\),N\.on\("detach"/,
+      'await fe.autoConnect(De),DxLightHardwarePowerRecover("usb-attach"))}),1500)})),N.on("detach"',
+      "usb attach hardware recovery",
+    );
+  }
+
+  if (!next.includes("DxLightRememberSyncIntent();R.info(`🔥 拨出设备")) {
+    next = replaceOnce(
+      next,
+      /N\.on\("detach",\(e=>\{R\.info\(`/,
+      'N.on("detach",(e=>{DxLightRememberSyncIntent();R.info(`',
+      "usb detach sync intent capture",
+    );
+  }
+
+  if (!next.includes('DxLightHardwarePowerRecover("hid-error")')) {
+    next = replaceOnce(
+      next,
+      /j\.on\("disconnected",\(e=>\{De\.webContents\.send\("disconnect",e\),fe\.removeDevice\(e\)\}\)\)/,
+      'j.on("disconnected",(e=>{DxLightRememberSyncIntent();De.webContents.send("disconnect",e),fe.removeDevice(e),DxLightHardwarePowerRecover("hid-error")}))',
+      "hid error hardware recovery",
+    );
+  }
+
+  if (!next.includes('DxLightHardwarePowerRecover("startup")')) {
+    next = replaceOnce(
+      next,
+      /await fe\.autoConnect\(De\),clearTimeout\(e\)/,
+      'await fe.autoConnect(De),DxLightHardwarePowerRecover("startup"),clearTimeout(e)',
+      "startup screen sync recovery",
+    );
+  }
+
   next = next.replace(
     /new w\(\{width:1280,height:800,/,
     "new w({width:1120,height:760,",
@@ -293,6 +378,19 @@ function patchMainBundle(source) {
   next = next.replace(/De\.setResizable\(!1\)/, "De.setResizable(!0)");
 
   return next;
+}
+
+function createHardwarePowerRecoveryPatch() {
+  return [
+    'let DxLightLastSyncDevice=null,DxLightHardwareRecoverTimer=null;',
+    'const DxLightRememberSyncIntent=()=>{try{const e=(Q.get("devices")||[]).find((e=>e&&e.isSyncScreen));e&&(DxLightLastSyncDevice={uuid:e.uuid,id:e.id,displayId:e.displayId,edgeNumber:e.edgeNumber,lampsAmount:e.lampsAmount})}catch(e){R.error("DX Light hardware power intent capture failed",e)}},',
+    'DxLightClearSyncIntent=()=>{DxLightLastSyncDevice=null},',
+    'DxLightRecoveryDisplayId=()=>{const e=O.getMonitors();return DxLightLastSyncDevice&&DxLightLastSyncDevice.displayId||e[0]&&e[0].displayId||""},',
+    'DxLightRestoreSyncDevice=()=>{const e=Q.get("devices")||[],t=DxLightLastSyncDevice,r=DxLightRecoveryDisplayId(),n=fe.devices.some((e=>e&&(t&&(e.uuid===t.uuid||e.id===t.id)||!t)));if(!n)return!1;let i=!1;const o=e.map(((e,n)=>{if(!e)return e;const o=t&&(e.uuid&&e.uuid===t.uuid||e.id&&e.id===t.id),s=o||!t&&0===n;return s&&(i=!0),{...e,isSyncScreen:s,isSwitchOn:s?!0:e.isSwitchOn,syncMode:s?0:e.syncMode,displayId:s?e.displayId||r:e.displayId}}));return!i&&o[0]&&(o[0]={...o[0],isSyncScreen:!0,isSwitchOn:!0,syncMode:0,displayId:o[0].displayId||r},i=!0),i?(Q.set("devices",o),!0):!1},',
+    'DxLightStartupSyncRequested=()=>process.argv.slice(1).some((e=>"--startup"===e)),',
+    'DxLightHardwarePowerRecover=e=>{clearTimeout(DxLightHardwareRecoverTimer),DxLightHardwareRecoverTimer=setTimeout((async()=>{try{await fe.autoConnect(De);const t=(Q.get("devices")||[]).some((e=>e&&e.isSyncScreen)),r=fe.devices.some((e=>e&&!0===e.isSyncScreen));if(t||r)return Re(),void R.info("DX Light hardware power recovery: restarted screen sync");if((DxLightLastSyncDevice||"startup"===e&&DxLightStartupSyncRequested())&&DxLightRestoreSyncDevice())return Pe(),setTimeout(Re,250),void R.info("DX Light hardware power recovery: restored screen sync")}catch(e){R.error("DX Light hardware power recovery failed",e)}}),2500)},',
+    'DxLightWakeRecover=()=>DxLightHardwarePowerRecover("wake")'
+  ].join("");
 }
 
 function patchPreloadBundle(source) {
@@ -335,8 +433,10 @@ function verifyExtractedApp(directory) {
     [main, "DxLightCaptureSamplingRate"],
     [main, "DxLightCaptureInterval"],
     [main, "DxLightActiveEdgeNumber"],
+    [main, "DxLightSyncDevices"],
+    [main, "DxLightReconnectBeforeSync"],
     [main, "DxLightForceMaxBrightness"],
-    [main, "me=!1;DxLightForceMaxBrightness();"],
+    [main, "me=!1;DxLightReconnectBeforeSync();DxLightForceMaxBrightness();"],
     [main, 'S.handle("sendBrightness",(async(e,t)=>{const r=new H;await r.send(255)}))'],
     [main, `Q.get("dxLightCaptureInterval")||${captureInterval}`],
     [main, "finalSyncSpeed:DxLightCaptureInterval(t)"],
@@ -345,15 +445,21 @@ function verifyExtractedApp(directory) {
     [main, "DX Light process priority: below normal"],
     [main, "DxLightShouldSendSyncFrame"],
     [main, "DxLightDashboardStatus"],
+    [main, "DxLightHardwarePowerRecover"],
+    [main, 'DxLightHardwarePowerRecover("startup")'],
+    [main, 'DxLightHardwarePowerRecover("usb-attach")'],
+    [main, 'DxLightHardwarePowerRecover("hid-error")'],
     [main, "native-border-status"],
     [main, "contentBoundsActive"],
+    [main, "nativeStatusReason"],
     [main, "dxLightSyncDashboard:status"],
     [main, "width:1120,height:760"],
     [main, "De.setResizable(!0)"],
     [worker, "edgeCapture"],
     [worker, "DxLightDxgiBorderSampler.exe"],
     [worker, "native-border-status"],
-    [worker, "buildRegions"],
+    [worker, "scheduleNativeSamplerRestart"],
+    [worker, "native ready timeout"],
     [worker, "parentPort.postMessage"],
     [preload, "dxLightSyncDashboard"],
     [html, "dx-sync-dashboard.css"],

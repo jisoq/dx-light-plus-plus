@@ -4,9 +4,25 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const ROOT = path.resolve(__dirname, '..');
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.DX_LIGHT_BRIDGE_PORT || 8787);
-const HID_MODULE_PATH = 'C:/Program Files/DX Light/resources/app.asar.unpacked/node_modules/node-hid/prebuilds/HID-win32-x64/node-napi-v3.node';
+const HID_MODULE_RELATIVE_PATH = path.join(
+  'resources',
+  'app.asar.unpacked',
+  'node_modules',
+  'node-hid',
+  'prebuilds',
+  'HID-win32-x64',
+  'node-napi-v3.node'
+);
+const HID_MODULE_CANDIDATES = [
+  process.env.DX_LIGHT_HID_MODULE_PATH,
+  path.join(ROOT, 'vendor-patched', 'DX Light', HID_MODULE_RELATIVE_PATH),
+  path.join(process.env.ProgramFiles || 'C:/Program Files', 'DX Light', HID_MODULE_RELATIVE_PATH),
+  path.join(process.env['ProgramFiles(x86)'] || 'C:/Program Files (x86)', 'DX Light', HID_MODULE_RELATIVE_PATH)
+].filter(Boolean);
+const HID_MODULE_PATH = HID_MODULE_CANDIDATES.find((candidate) => fs.existsSync(candidate)) || HID_MODULE_CANDIDATES[0];
 const APP_NAME = 'DX Light Screen Sync';
 const STARTUP_SCRIPT_NAME = 'DX Light Screen Sync Bridge.vbs';
 const VID = 0x1a86;
@@ -28,6 +44,7 @@ try {
   hid = require(HID_MODULE_PATH);
 } catch (error) {
   console.error(`Failed to load node-hid native module: ${error.message}`);
+  console.error(`Checked:\n${HID_MODULE_CANDIDATES.map((candidate) => `- ${candidate}`).join('\n')}`);
   process.exit(1);
 }
 
