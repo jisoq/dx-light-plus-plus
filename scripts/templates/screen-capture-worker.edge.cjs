@@ -16,9 +16,12 @@ const {
 } = workerData;
 
 let exiting = false;
+let timer = null;
+let regionIndex = 0;
 let nativeProcess = null;
 let nativeRestartTimer = null;
 let nativeRestartAttempts = 0;
+let sequentialStarted = false;
 
 function logNativeSampler(message) {
   try {
@@ -61,6 +64,135 @@ const stopNativeSampler = () => {
   }
 };
 
+const toBytes = (value) => {
+  if (!value) {
+    return null;
+  }
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (typeof value === "object") {
+    const keys = Object.keys(value).sort((left, right) => Number(left) - Number(right));
+    return Uint8Array.from(keys.map((key) => Number(value[key] || 0)));
+  }
+  return null;
+};
+
+const stateFor = (display, rate) => {
+  const cols = Math.max(1, Math.ceil(display.width / rate));
+  const rows = Math.max(1, Math.ceil(display.height / rate));
+  return {
+    display,
+    cols,
+    rows,
+    buffer: new Uint8Array(3 * cols * rows),
+    seen: new Set(),
+    required: Number(edgeNumber) === 4 ? 4 : 3,
+  };
+};
+
+const states = new Map();
+const regions = [];
+
+function addRegion(name, source, display, offsetX, offsetY) {
+  regions.push({ name, source, display, offsetX, offsetY });
+}
+
+function buildRegions() {
+  states.clear();
+  regions.length = 0;
+
+  for (const display of displays) {
+    const state = stateFor(display, samplingRate);
+    states.set(display.displayId, state);
+
+    const horizontalThickness = Math.min(display.height, Math.max(samplingRate, 3 * samplingRate));
+    const verticalThickness = Math.min(display.width, Math.max(samplingRate, 3 * samplingRate));
+    const rightOffset = state.cols - Math.max(1, Math.ceil(verticalThickness / samplingRate));
+    const bottomOffset = state.rows - Math.max(1, Math.ceil(horizontalThickness / samplingRate));
+
+    addRegion("top", display, {
+      ...display,
+      x: display.x,
+      y: display.y,
+      width: display.width,
+      height: horizontalThickness,
+    }, 0, 0);
+
+    addRegion("left", display, {
+      ...display,
+      x: display.x,
+      y: display.y,
+      width: verticalThickness,
+      height: display.height,
+    }, 0, 0);
+
+    addRegion("right", display, {
+      ...display,
+      x: display.x + display.width - verticalThickness,
+      y: display.y,
+      width: verticalThickness,
+      height: display.height,
+    }, rightOffset, 0);
+
+    if (Number(edgeNumber) === 4) {
+      addRegion("bottom", display, {
+        ...display,
+        x: display.x,
+        y: display.y + display.height - horizontalThickness,
+        width: display.width,
+        height: horizontalThickness,
+      }, 0, bottomOffset);
+    }
+  }
+}
+
+function applyRegion(region, frameMap) {
+  const state = states.get(region.source.displayId);
+  if (!state) {
+    return;
+  }
+
+  const bytes = toBytes(frameMap[region.source.displayId]);
+  if (!bytes) {
+    return;
+  }
+
+  const regionCols = Math.max(1, Math.ceil(region.display.width / samplingRate));
+  const regionRows = Math.max(1, Math.ceil(region.display.height / samplingRate));
+  for (let row = 0; row < regionRows; row += 1) {
+    for (let col = 0; col < regionCols; col += 1) {
+      const targetCol = region.offsetX + col;
+      const targetRow = region.offsetY + row;
+      if (targetCol < 0 || targetRow < 0 || targetCol >= state.cols || targetRow >= state.rows) {
+        continue;
+      }
+
+      const sourceOffset = 3 * (row * regionCols + col);
+      const targetOffset = 3 * (targetRow * state.cols + targetCol);
+      state.buffer[targetOffset] = bytes[sourceOffset] || 0;
+      state.buffer[targetOffset + 1] = bytes[sourceOffset + 1] || 0;
+      state.buffer[targetOffset + 2] = bytes[sourceOffset + 2] || 0;
+    }
+  }
+
+  state.seen.add(region.name);
+  if (state.seen.size >= state.required) {
+    const output = {};
+    output[state.display.displayId] = state.buffer.slice(0);
+    parentPort.postMessage(output);
+  }
+}
+
+function schedule(delay = 0) {
+  if (!exiting) {
+    timer = setTimeout(captureNext, delay);
+  }
+}
+
 function nativeSamplerCandidates() {
   return [
     process.env.DX_LIGHT_NATIVE_SAMPLER_PATH,
@@ -82,6 +214,49 @@ function postNativeStatus(reason, extra = {}) {
     reason: reason || "",
     ...extra,
   });
+}
+
+function isDisplayOffReason(reason) {
+  return /DXGI_ERROR_ACCESS_LOST|display target|display path|display source|physical monitor|selected output/i.test(String(reason || ""));
+}
+
+function postBlackFrame(reason, extra = {}) {
+  const display = displays[0];
+  if (!display) {
+    postNativeStatus(reason, {
+      displayActive: false,
+      ...extra,
+    });
+    return;
+  }
+
+  const cols = Math.max(1, Math.ceil(display.width / samplingRate));
+  const rows = Math.max(1, Math.ceil(display.height / samplingRate));
+  const output = {};
+  output[display.displayId || "DISPLAY1"] = new Uint8Array(cols * rows * 3);
+
+  postNativeStatus(reason, {
+    displayActive: false,
+    ...extra,
+  });
+  parentPort.postMessage(output);
+}
+
+function startSequentialEdgeCapture(reason) {
+  if (sequentialStarted || exiting) {
+    return;
+  }
+
+  sequentialStarted = true;
+  stopNativeSampler();
+  parentPort.postMessage({
+    type: "native-border-status",
+    mode: "sequential-edge",
+    backend: "quiklight-region-fallback",
+    reason: reason || "",
+  });
+  buildRegions();
+  schedule(0);
 }
 
 function scheduleNativeSamplerRestart(reason, nativeStartedAt) {
@@ -120,7 +295,8 @@ function startNativeBorderSampler() {
       ? "native sampler disabled by DX_LIGHT_NATIVE_BORDER=0"
       : `waiting for active display count=${displays.length}`;
     logNativeSampler(reason);
-    postNativeStatus(reason);
+    postBlackFrame(reason);
+    startSequentialEdgeCapture(reason);
     return true;
   }
 
@@ -128,7 +304,8 @@ function startNativeBorderSampler() {
   if (!executable) {
     const reason = `native sampler not found candidates=${nativeSamplerCandidates().join("|")}`;
     logNativeSampler(reason);
-    scheduleNativeSamplerRestart(reason, Date.now());
+    postBlackFrame(reason);
+    startSequentialEdgeCapture(reason);
     return true;
   }
 
@@ -180,6 +357,15 @@ function startNativeBorderSampler() {
       } catch {
         // Process may have already exited.
       }
+    }
+    postBlackFrame(reason);
+    if (isDisplayOffReason(reason)) {
+      logNativeSampler(`holding black frame until sync restarts reason=${reason}`);
+      return;
+    }
+    if (!sawFrame) {
+      startSequentialEdgeCapture(reason);
+      return;
     }
     scheduleNativeSamplerRestart(reason, nativeStartedAt);
   };
@@ -272,7 +458,8 @@ function startNativeBorderSampler() {
       contentBoundsActive: Boolean(message.contentBoundsActive),
       contentLeft: message.contentLeft || 0,
       contentRight: message.contentRight || 0,
-      reason: "",
+      displayActive: message.displayActive !== false,
+      reason: message.displayStatusReason || "",
     });
 
     const output = {};
@@ -281,6 +468,44 @@ function startNativeBorderSampler() {
   }
 
   return true;
+}
+
+function captureNext() {
+  if (exiting) {
+    return;
+  }
+  if (!regions.length) {
+    schedule(100);
+    return;
+  }
+
+  const region = regions[regionIndex++ % regions.length];
+  let finished = false;
+  const finish = () => {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    stopNative();
+    schedule(0);
+  };
+
+  try {
+    startCaptureMultiScreens((frameMap) => {
+      if (finished || exiting) {
+        return;
+      }
+      finished = true;
+      stopNative();
+      applyRegion(region, frameMap);
+      schedule(0);
+    }, [region.display], finalSyncSpeed, samplingRate);
+  } catch (error) {
+    parentPort.postMessage({ type: "error", error: error && error.stack ? error.stack : String(error) });
+    finish();
+  }
+
+  setTimeout(finish, Math.max(500, 4 * finalSyncSpeed));
 }
 
 try {
@@ -298,6 +523,9 @@ try {
 parentPort.on("message", (message) => {
   if (message === "exit") {
     exiting = true;
+    if (timer) {
+      clearTimeout(timer);
+    }
     stopNativeSampler();
     stopNative();
     parentPort.close();

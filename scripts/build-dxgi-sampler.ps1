@@ -78,6 +78,8 @@ $optimize = if ($Configuration -ieq "Debug") { "-O0" } else { "-O2" }
     $source `
     -ld3d11 `
     -ldxgi `
+    -ldxva2 `
+    -luser32 `
     -lole32
 
 if ($LASTEXITCODE -ne 0) {

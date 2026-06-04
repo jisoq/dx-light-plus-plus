@@ -312,6 +312,24 @@ function patchMainBundle(source) {
     );
   }
 
+  if (!next.includes("Oe.nativeOff")) {
+    next = replaceOnce(
+      next,
+      /if\(t&&t\.type==="native-border-status"\)\{Oe\.native=t;return\}if\(!me\)\{/,
+      'if(t&&t.type==="native-border-status"){Oe.native=t;if(t.displayActive===false){Oe.nativeOff=!0;Promise.resolve(M()).catch((e=>R.error("DX Light display-off turn off failed",e)));return}if(t.displayActive===true)Oe.nativeOff=!1;return}if(!me&&!Oe.nativeOff){',
+      "native display-off light shutdown",
+    );
+  }
+
+  if (!next.includes("DX Light display-removed turn off failed")) {
+    next = replaceOnce(
+      next,
+      /I\.on\("display-removed",\(\(e,t\)=>\{Pe\(\),De\.webContents\.send\("displayRemoved",t\)\}\)\)/,
+      'I.on("display-removed",((e,t)=>{Pe(),Oe.nativeOff=!0,Promise.resolve(M()).catch((e=>R.error("DX Light display-removed turn off failed",e))),De.webContents.send("displayRemoved",t)}))',
+      "display removed light shutdown",
+    );
+  }
+
   if (!next.includes("DxLightHardwarePowerRecover")) {
     next = replaceOnce(
       next,
@@ -450,6 +468,9 @@ function verifyExtractedApp(directory) {
     [main, 'DxLightHardwarePowerRecover("usb-attach")'],
     [main, 'DxLightHardwarePowerRecover("hid-error")'],
     [main, "native-border-status"],
+    [main, "Oe.nativeOff"],
+    [main, "DX Light display-off turn off failed"],
+    [main, "DX Light display-removed turn off failed"],
     [main, "contentBoundsActive"],
     [main, "nativeStatusReason"],
     [main, "dxLightSyncDashboard:status"],
@@ -459,6 +480,7 @@ function verifyExtractedApp(directory) {
     [worker, "DxLightDxgiBorderSampler.exe"],
     [worker, "native-border-status"],
     [worker, "scheduleNativeSamplerRestart"],
+    [worker, "startSequentialEdgeCapture"],
     [worker, "native ready timeout"],
     [worker, "parentPort.postMessage"],
     [preload, "dxLightSyncDashboard"],

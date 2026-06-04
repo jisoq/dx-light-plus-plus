@@ -2,6 +2,8 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <lowlevelmonitorconfigurationapi.h>
+#include <physicalmonitorenumerationapi.h>
 
 #include <algorithm>
 #include <chrono>
@@ -173,6 +175,13 @@ static bool shouldRetryDuplicateOutput(HRESULT hr)
     return hr != DXGI_ERROR_UNSUPPORTED && hr != E_INVALIDARG;
 }
 
+enum class MonitorPowerProbeResult
+{
+    Unknown,
+    On,
+    LowPower
+};
+
 static std::string base64Encode(const std::vector<uint8_t>& bytes)
 {
     static const char* alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -211,6 +220,158 @@ static int displayOrdinal(const std::string& displayId)
     }
     const int parsed = std::atoi(displayId.c_str() + 7);
     return std::max(0, parsed - 1);
+}
+
+static bool wideEqualsIgnoreCase(const WCHAR* left, const WCHAR* right)
+{
+    return CompareStringOrdinal(left, -1, right, -1, TRUE) == CSTR_EQUAL;
+}
+
+static bool displayConfigTargetIsAvailable(const WCHAR* gdiDeviceName, std::string& reason)
+{
+    UINT32 pathCount = 0;
+    UINT32 modeCount = 0;
+    LONG result = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount);
+    if (result != ERROR_SUCCESS || pathCount == 0)
+    {
+        return true;
+    }
+
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+    result = QueryDisplayConfig(
+        QDC_ONLY_ACTIVE_PATHS,
+        &pathCount,
+        paths.data(),
+        &modeCount,
+        modes.data(),
+        nullptr);
+    if (result != ERROR_SUCCESS)
+    {
+        return true;
+    }
+
+    bool matchedSource = false;
+    for (UINT32 index = 0; index < pathCount; ++index)
+    {
+        const DISPLAYCONFIG_PATH_INFO& pathInfo = paths[index];
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName{};
+        sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        sourceName.header.size = sizeof(sourceName);
+        sourceName.header.adapterId = pathInfo.sourceInfo.adapterId;
+        sourceName.header.id = pathInfo.sourceInfo.id;
+
+        if (DisplayConfigGetDeviceInfo(&sourceName.header) != ERROR_SUCCESS ||
+            !wideEqualsIgnoreCase(sourceName.viewGdiDeviceName, gdiDeviceName))
+        {
+            continue;
+        }
+
+        matchedSource = true;
+        if ((pathInfo.flags & DISPLAYCONFIG_PATH_ACTIVE) == 0)
+        {
+            reason = "display path is not active";
+            return false;
+        }
+        if (!pathInfo.targetInfo.targetAvailable)
+        {
+            reason = "display target is not available";
+            return false;
+        }
+
+        DISPLAYCONFIG_TARGET_DEVICE_NAME targetName{};
+        targetName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+        targetName.header.size = sizeof(targetName);
+        targetName.header.adapterId = pathInfo.targetInfo.adapterId;
+        targetName.header.id = pathInfo.targetInfo.id;
+        if (DisplayConfigGetDeviceInfo(&targetName.header) == ERROR_SUCCESS &&
+            targetName.monitorFriendlyDeviceName[0] == L'\0' &&
+            targetName.monitorDevicePath[0] == L'\0')
+        {
+            reason = "display target has no connected monitor";
+            return false;
+        }
+
+        return true;
+    }
+
+    if (!matchedSource)
+    {
+        reason = "display source is not active";
+        return false;
+    }
+    return true;
+}
+
+static std::string hexMonitorPowerMode(DWORD value)
+{
+    std::ostringstream output;
+    output << "0x"
+           << std::uppercase << std::hex << std::setw(2) << std::setfill('0')
+           << value;
+    return output.str();
+}
+
+static bool isKnownLowPowerMonitorMode(DWORD value)
+{
+    return value >= 0x02 && value <= 0x05;
+}
+
+static MonitorPowerProbeResult queryPhysicalMonitorPower(HMONITOR monitor, DWORD& powerMode)
+{
+    if (!monitor)
+    {
+        return MonitorPowerProbeResult::Unknown;
+    }
+
+    DWORD physicalMonitorCount = 0;
+    if (!GetNumberOfPhysicalMonitorsFromHMONITOR(monitor, &physicalMonitorCount) ||
+        physicalMonitorCount == 0)
+    {
+        return MonitorPowerProbeResult::Unknown;
+    }
+
+    std::vector<PHYSICAL_MONITOR> physicalMonitors(physicalMonitorCount);
+    if (!GetPhysicalMonitorsFromHMONITOR(monitor, physicalMonitorCount, physicalMonitors.data()))
+    {
+        return MonitorPowerProbeResult::Unknown;
+    }
+
+    MonitorPowerProbeResult result = MonitorPowerProbeResult::Unknown;
+    DWORD lowPowerMode = 0;
+    for (const PHYSICAL_MONITOR& physicalMonitor : physicalMonitors)
+    {
+        DWORD currentValue = 0;
+        DWORD maximumValue = 0;
+        MC_VCP_CODE_TYPE codeType{};
+        if (!GetVCPFeatureAndVCPFeatureReply(
+            physicalMonitor.hPhysicalMonitor,
+            0xD6,
+            &codeType,
+            &currentValue,
+            &maximumValue))
+        {
+            continue;
+        }
+
+        if (currentValue == 0x01)
+        {
+            result = MonitorPowerProbeResult::On;
+            break;
+        }
+        if (isKnownLowPowerMonitorMode(currentValue))
+        {
+            result = MonitorPowerProbeResult::LowPower;
+            lowPowerMode = currentValue;
+        }
+    }
+
+    DestroyPhysicalMonitors(physicalMonitorCount, physicalMonitors.data());
+    if (result == MonitorPowerProbeResult::LowPower)
+    {
+        powerMode = lowPowerMode;
+    }
+    return result;
 }
 
 static OutputSelection selectOutput(const Options& options)
@@ -301,6 +462,8 @@ public:
     int averageRadiusPx() const { return options_.averageRadiusPx; }
     int smoothingAlphaPercent() const { return options_.smoothingAlphaPercent; }
     int deadband() const { return options_.deadband; }
+    bool displayActive() const { return displayActive_; }
+    const std::string& displayStatusReason() const { return displayStatusReason_; }
     bool contentBoundsActive() const { return lastContentBounds_.active; }
     int contentBoundsLeft() const { return lastContentBounds_.left; }
     int contentBoundsRight() const { return lastContentBounds_.right; }
@@ -314,12 +477,23 @@ public:
         {
             if (hr == DXGI_ERROR_WAIT_TIMEOUT)
             {
+                std::string reason;
+                if (!isSelectedOutputAvailable(reason))
+                {
+                    std::cerr << "Blanking DXGI frame because selected output is inactive: "
+                              << reason << std::endl;
+                    return blankFrame(reason);
+                }
+                displayActive_ = true;
+                displayStatusReason_.clear();
                 return rgb_;
             }
             if (isDuplicationSessionLoss(hr))
             {
+                const std::string reason = "duplication session lost: " + describeHresult(hr);
                 std::cerr << "Recovering DXGI duplication after AcquireNextFrame failed: "
                           << describeHresult(hr) << std::endl;
+                blankFrame(reason);
                 resetDeviceResources();
                 return rgb_;
             }
@@ -361,6 +535,9 @@ public:
                 writeHorizontalBand(bottomLine, rows_ - horizontalBandRows_, rows_);
             }
             smoothFrame();
+            displayActive_ = true;
+            displayStatusReason_.clear();
+            monitorPowerProbeFailureCount_ = 0;
         }
         catch (...)
         {
@@ -414,6 +591,10 @@ private:
     std::vector<uint8_t> rgb_;
     std::vector<uint8_t> previousRgb_;
     bool hasPreviousRgb_ = false;
+    bool displayActive_ = true;
+    std::string displayStatusReason_;
+    bool monitorPowerProbeEverSucceeded_ = false;
+    int monitorPowerProbeFailureCount_ = 0;
     int contentBoundsHoldFrames_ = 0;
     ContentBounds lastContentBounds_;
 
@@ -456,6 +637,70 @@ private:
         releaseCom(selection_.adapter);
         selection_ = selectOutput(options_);
         updatePhysicalMetrics();
+    }
+
+    bool isSelectedOutputAvailable(std::string& reason)
+    {
+        DXGI_OUTPUT_DESC desc{};
+        HRESULT hr = selection_.output->GetDesc(&desc);
+        if (FAILED(hr))
+        {
+            reason = "selected output description is unavailable: " + describeHresult(hr);
+            return false;
+        }
+
+        selection_.desc = desc;
+        updatePhysicalMetrics();
+        if (!desc.AttachedToDesktop)
+        {
+            reason = "selected output is not attached to the desktop";
+            return false;
+        }
+
+        if (!displayConfigTargetIsAvailable(desc.DeviceName, reason))
+        {
+            return false;
+        }
+
+        DWORD powerMode = 0;
+        const MonitorPowerProbeResult powerProbe = queryPhysicalMonitorPower(desc.Monitor, powerMode);
+        if (powerProbe == MonitorPowerProbeResult::On)
+        {
+            monitorPowerProbeEverSucceeded_ = true;
+            monitorPowerProbeFailureCount_ = 0;
+            return true;
+        }
+        if (powerProbe == MonitorPowerProbeResult::LowPower)
+        {
+            monitorPowerProbeEverSucceeded_ = true;
+            monitorPowerProbeFailureCount_ = 0;
+            reason = "physical monitor power mode is low-power (" + hexMonitorPowerMode(powerMode) + ")";
+            return false;
+        }
+
+        if (monitorPowerProbeEverSucceeded_)
+        {
+            monitorPowerProbeFailureCount_ += 1;
+            if (monitorPowerProbeFailureCount_ >= 2)
+            {
+                reason = "physical monitor power state is unreachable after previously responding";
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    const std::vector<uint8_t>& blankFrame(const std::string& reason)
+    {
+        std::fill(rgb_.begin(), rgb_.end(), 0);
+        previousRgb_ = rgb_;
+        hasPreviousRgb_ = true;
+        displayActive_ = false;
+        displayStatusReason_ = reason;
+        contentBoundsHoldFrames_ = 0;
+        lastContentBounds_ = ContentBounds{};
+        return rgb_;
     }
 
     void resetDeviceResources()
@@ -987,6 +1232,8 @@ int main(int argc, char** argv)
                       << ",\"averageRadiusPx\":" << sampler.averageRadiusPx()
                       << ",\"smoothingAlphaPercent\":" << sampler.smoothingAlphaPercent()
                       << ",\"deadband\":" << sampler.deadband()
+                      << ",\"displayActive\":" << (sampler.displayActive() ? "true" : "false")
+                      << ",\"displayStatusReason\":\"" << escapeJson(sampler.displayStatusReason()) << "\""
                       << ",\"cols\":" << sampler.cols()
                       << ",\"rows\":" << sampler.rows()
                       << ",\"elapsedMs\":" << elapsedMs
