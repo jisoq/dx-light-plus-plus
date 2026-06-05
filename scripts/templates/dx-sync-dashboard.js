@@ -314,7 +314,7 @@
         <div class="dx-panel-body">
           <dl class="dx-kv">
             <dt>디스플레이 필터</dt><dd>${capture.displayFilter ? "켜짐" : "알 수 없음"}</dd>
-            <dt>테두리 worker</dt><dd>${capture.mode === "sequential-edge" ? "켜짐" : "알 수 없음"}</dd>
+            <dt>테두리 worker</dt><dd>${capture.mode === "native-border" ? "네이티브" : "확인 필요"}</dd>
             <dt>중복 생략</dt><dd>${capture.duplicateSuppression ? "켜짐" : "꺼짐"}</dd>
             <dt>우선순위</dt><dd>${escapeHtml(priorityLabel(capture.priority))}</dd>
             <dt>래터박스 회피</dt><dd>${capture.contentBoundsActive ? "켜짐" : "자동 감지"}</dd>
@@ -346,10 +346,10 @@
         <thead><tr><th>검사</th><th>상태</th><th>값</th></tr></thead>
         <tbody>
           <tr><td>패치 버전</td><td>${badge("정상", "ok")}</td><td>${escapeHtml(status.patchVersion || "")}</td></tr>
-          <tr><td>테두리 캡쳐</td><td>${badge(capture.mode === "native-border" ? "네이티브" : capture.mode === "sequential-edge" ? "fallback" : "확인 필요", capture.mode === "native-border" ? "ok" : capture.mode === "sequential-edge" ? "warn" : "off")}</td><td>${escapeHtml(modeLabel(capture.mode))}</td></tr>
+          <tr><td>테두리 캡쳐</td><td>${badge(capture.mode === "native-border" ? "네이티브" : "확인 필요", capture.mode === "native-border" ? "ok" : "warn")}</td><td>${escapeHtml(modeLabel(capture.mode))}</td></tr>
           <tr><td>활성 디스플레이 필터</td><td>${badge(capture.displayFilter ? "정상" : "확인 필요", capture.displayFilter ? "ok" : "warn")}</td><td>${escapeHtml(filterLabel(capture.displayFilter))}</td></tr>
           <tr><td>중복 프레임 생략</td><td>${badge(capture.duplicateSuppression ? "정상" : "꺼짐", capture.duplicateSuppression ? "ok" : "off")}</td><td>${escapeHtml(runtime.signature || "대기 중")}</td></tr>
-          <tr><td>네이티브 샘플러</td><td>${badge(capture.mode === "native-border" ? "실행 중" : "대기", capture.mode === "native-border" ? "ok" : "warn")}</td><td>${escapeHtml(nativeSamplerSub(capture))}</td></tr>
+          <tr><td>네이티브 샘플러</td><td>${badge(nativeSamplerLabel(capture), capture.mode === "native-border" && !nativeSamplerReason(capture) ? "ok" : "warn")}</td><td>${escapeHtml(nativeSamplerSub(capture))}</td></tr>
           <tr><td>래터박스 회피</td><td>${badge(capture.contentBoundsActive ? "동작 중" : "감지 대기", capture.contentBoundsActive ? "ok" : "warn")}</td><td>${escapeHtml(contentBoundsLabel(capture))}</td></tr>
         </tbody>
       </table>
@@ -389,7 +389,7 @@
 
   function modeLabel(value) {
     if (value === "sequential-edge") {
-      return "순차 테두리";
+      return "레거시 순차 테두리";
     }
     if (value === "native-border") {
       return "네이티브 테두리";
@@ -402,20 +402,25 @@
 
   function nativeSamplerLabel(capture) {
     if (capture.mode === "native-border") {
-      return "실행 중";
+      return nativeSamplerReason(capture) ? "재시도" : "실행 중";
     }
     if (capture.nativeBorderSampler && capture.nativeBorderSampler !== "planned") {
       return capture.nativeBorderSampler;
     }
-    return "대기";
+    return "확인 필요";
+  }
+
+  function nativeSamplerReason(capture) {
+    return capture.nativeStatusReason || capture.nativeFallbackReason || "";
   }
 
   function nativeSamplerSub(capture) {
     if (capture.nativeFrameMs) {
       return `${Number(capture.nativeFrameMs).toFixed(2)}ms · ${capture.nativeBorderSampler || "DXGI"}`;
     }
-    if (capture.nativeFallbackReason) {
-      return capture.nativeFallbackReason;
+    const reason = nativeSamplerReason(capture);
+    if (reason) {
+      return reason;
     }
     if (capture.nativeBorderSampler && capture.nativeBorderSampler !== "planned") {
       return capture.nativeBorderSampler;

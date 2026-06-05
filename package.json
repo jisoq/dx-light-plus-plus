@@ -10,12 +10,16 @@
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
     "lint": "tsc --noEmit",
-    "native:build": "powershell -ExecutionPolicy Bypass -File scripts/build-dxgi-sampler.ps1; powershell -ExecutionPolicy Bypass -File scripts/build-native-sampler.ps1",
+    "native:build": "powershell -ExecutionPolicy Bypass -File scripts/build-dxgi-sampler.ps1 && powershell -ExecutionPolicy Bypass -File scripts/build-native-sampler.ps1",
     "native:bench": "node scripts/bench-native-sampler.cjs",
     "dxlight:patch": "node scripts/patch-dxlight-runtime.cjs apply",
     "dxlight:patch:restart": "node scripts/patch-dxlight-runtime.cjs apply --restart",
     "dxlight:verify": "node scripts/patch-dxlight-runtime.cjs verify",
-    "dxlight:rollback": "node scripts/patch-dxlight-runtime.cjs rollback --restart"
+    "dxlight:rollback": "node scripts/patch-dxlight-runtime.cjs rollback --restart",
+    "dxlight:start-local": "powershell -ExecutionPolicy Bypass -File scripts/start-local-dx-light.ps1",
+    "dxlight:startup:enable": "powershell -ExecutionPolicy Bypass -File scripts/register-dxlight-startup.ps1 enable",
+    "dxlight:startup:disable": "powershell -ExecutionPolicy Bypass -File scripts/register-dxlight-startup.ps1 disable",
+    "dxlight:startup:status": "powershell -ExecutionPolicy Bypass -File scripts/register-dxlight-startup.ps1 status"
   },
   "keywords": [
     "dx-light",

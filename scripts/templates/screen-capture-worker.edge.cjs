@@ -19,6 +19,8 @@ let exiting = false;
 let timer = null;
 let regionIndex = 0;
 let nativeProcess = null;
+let nativeRestartTimer = null;
+let nativeRestartAttempts = 0;
 let sequentialStarted = false;
 
 function logNativeSampler(message) {
@@ -48,6 +50,10 @@ const stopNative = () => {
 };
 
 const stopNativeSampler = () => {
+  if (nativeRestartTimer) {
+    clearTimeout(nativeRestartTimer);
+    nativeRestartTimer = null;
+  }
   if (nativeProcess) {
     try {
       nativeProcess.kill();
@@ -96,6 +102,9 @@ function addRegion(name, source, display, offsetX, offsetY) {
 }
 
 function buildRegions() {
+  states.clear();
+  regions.length = 0;
+
   for (const display of displays) {
     const state = stateFor(display, samplingRate);
     states.set(display.displayId, state);
@@ -197,35 +206,115 @@ function findNativeSampler() {
   return nativeSamplerCandidates().find((candidate) => fs.existsSync(candidate));
 }
 
+function postNativeStatus(reason, extra = {}) {
+  parentPort.postMessage({
+    type: "native-border-status",
+    mode: "native-border",
+    backend: "dxgi-desktop-duplication",
+    reason: reason || "",
+    ...extra,
+  });
+}
+
+function isDisplayOffReason(reason) {
+  return /display target|display path|display source|physical monitor|selected output/i.test(String(reason || ""));
+}
+
+function postBlackFrame(reason, extra = {}) {
+  const display = displays[0];
+  if (!display) {
+    postNativeStatus(reason, {
+      displayActive: false,
+      ...extra,
+    });
+    return;
+  }
+
+  const cols = Math.max(1, Math.ceil(display.width / samplingRate));
+  const rows = Math.max(1, Math.ceil(display.height / samplingRate));
+  const output = {};
+  output[display.displayId || "DISPLAY1"] = new Uint8Array(cols * rows * 3);
+
+  postNativeStatus(reason, {
+    displayActive: false,
+    ...extra,
+  });
+  parentPort.postMessage(output);
+}
+
 function startSequentialEdgeCapture(reason) {
   if (sequentialStarted || exiting) {
     return;
   }
+
   sequentialStarted = true;
+  stopNativeSampler();
   parentPort.postMessage({
     type: "native-border-status",
     mode: "sequential-edge",
     backend: "quiklight-region-fallback",
     reason: reason || "",
+    displayActive: true,
   });
   buildRegions();
   schedule(0);
 }
 
+function scheduleNativeSamplerRestart(reason, nativeStartedAt) {
+  if (exiting) {
+    return true;
+  }
+
+  if (Date.now() - nativeStartedAt > 10000) {
+    nativeRestartAttempts = 0;
+  }
+  nativeRestartAttempts += 1;
+
+  const delay = Math.min(5000, 500 * (2 ** Math.min(nativeRestartAttempts - 1, 4)));
+  logNativeSampler(`restart attempt=${nativeRestartAttempts} delayMs=${delay} reason=${reason}`);
+  postNativeStatus(`restarting native sampler: ${reason}`, {
+    nativeRestartAttempt: nativeRestartAttempts,
+    nativeRetryDelayMs: delay,
+  });
+
+  nativeRestartTimer = setTimeout(() => {
+    nativeRestartTimer = null;
+    if (!exiting) {
+      startNativeBorderSampler();
+    }
+  }, delay);
+  return true;
+}
+
 function startNativeBorderSampler() {
+  if (nativeProcess) {
+    return true;
+  }
+
   if (process.env.DX_LIGHT_NATIVE_BORDER === "0" || displays.length < 1) {
-    logNativeSampler(`native disabled or no displays count=${displays.length}`);
-    return false;
+    const reason = process.env.DX_LIGHT_NATIVE_BORDER === "0"
+      ? "native sampler disabled by DX_LIGHT_NATIVE_BORDER=0"
+      : `waiting for active display count=${displays.length}`;
+    logNativeSampler(reason);
+    postBlackFrame(reason);
+    startSequentialEdgeCapture(reason);
+    return true;
   }
 
   const executable = findNativeSampler();
   if (!executable) {
-    logNativeSampler(`native sampler not found candidates=${nativeSamplerCandidates().join("|")}`);
-    return false;
+    const reason = `native sampler not found candidates=${nativeSamplerCandidates().join("|")}`;
+    logNativeSampler(reason);
+    postBlackFrame(reason);
+    startSequentialEdgeCapture(reason);
+    return true;
   }
 
   const display = displays[0];
   const edgeThicknessPx = Math.max(1, Number(process.env.DX_LIGHT_NATIVE_EDGE_THICKNESS_PX || samplingRate * 3));
+  const averageRadiusPx = Math.max(0, Number(process.env.DX_LIGHT_NATIVE_AVERAGE_RADIUS_PX || 12));
+  const smoothingAlphaPercent = Math.max(1, Math.min(100, Number(process.env.DX_LIGHT_NATIVE_SMOOTHING_ALPHA_PERCENT || 35)));
+  const deadband = Math.max(0, Number(process.env.DX_LIGHT_NATIVE_DEADBAND || 10));
   const args = [
     "--displayId", display.displayId || "DISPLAY1",
     "--x", String(Math.round(display.x || 0)),
@@ -234,6 +323,9 @@ function startNativeBorderSampler() {
     "--height", String(Math.max(1, Math.round(display.height || 1))),
     "--samplingRate", String(Math.max(20, Math.round(samplingRate))),
     "--edgeThicknessPx", String(edgeThicknessPx),
+    "--averageRadiusPx", String(averageRadiusPx),
+    "--smoothingAlphaPercent", String(smoothingAlphaPercent),
+    "--deadband", String(deadband),
     "--edgeNumber", String(Number(edgeNumber) === 4 ? 4 : 3),
     "--intervalMs", String(Math.max(8, Math.round(finalSyncSpeed))),
   ];
@@ -241,22 +333,53 @@ function startNativeBorderSampler() {
   let stdout = "";
   let stderr = "";
   let sawFrame = false;
-  nativeProcess = spawn(executable, args, {
+  let restartScheduled = false;
+  const nativeStartedAt = Date.now();
+  const child = spawn(executable, args, {
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  nativeProcess = child;
   logNativeSampler(`spawn ${executable} ${args.join(" ")}`);
+  postNativeStatus("starting native sampler");
 
-  const fallbackTimer = setTimeout(() => {
+  const requestRestart = (reason, killProcess) => {
+    if (restartScheduled || exiting) {
+      return;
+    }
+    restartScheduled = true;
+    clearTimeout(readyTimer);
+    if (nativeProcess === child) {
+      nativeProcess = null;
+    }
+    if (killProcess) {
+      try {
+        child.kill();
+      } catch {
+        // Process may have already exited.
+      }
+    }
+    postBlackFrame(reason);
+    if (isDisplayOffReason(reason)) {
+      logNativeSampler(`holding black frame until sync restarts reason=${reason}`);
+      return;
+    }
+    if (!sawFrame) {
+      startSequentialEdgeCapture(reason);
+      return;
+    }
+    scheduleNativeSamplerRestart(reason, nativeStartedAt);
+  };
+
+  const readyTimer = setTimeout(() => {
     if (!sawFrame && !exiting) {
       const reason = stderr.trim() || "native sampler did not produce a frame";
-      logNativeSampler(`fallback timeout reason=${reason}`);
-      stopNativeSampler();
-      startSequentialEdgeCapture(reason);
+      logNativeSampler(`native ready timeout reason=${reason}`);
+      requestRestart(reason, true);
     }
   }, Math.max(1500, finalSyncSpeed * 10));
 
-  nativeProcess.stdout.on("data", (chunk) => {
+  child.stdout.on("data", (chunk) => {
     stdout += chunk.toString("utf8");
     let newline = stdout.indexOf("\n");
     while (newline >= 0) {
@@ -269,17 +392,24 @@ function startNativeBorderSampler() {
     }
   });
 
-  nativeProcess.stderr.on("data", (chunk) => {
+  child.stderr.on("data", (chunk) => {
     stderr += chunk.toString("utf8");
     logNativeSampler(`stderr ${chunk.toString("utf8").trim()}`);
   });
 
-  nativeProcess.on("exit", (code) => {
-    clearTimeout(fallbackTimer);
-    nativeProcess = null;
+  child.on("error", (error) => {
+    requestRestart(error && error.message ? error.message : String(error), false);
+  });
+
+  child.on("exit", (code) => {
+    clearTimeout(readyTimer);
+    if (nativeProcess === child) {
+      nativeProcess = null;
+    }
+    const reason = stderr.trim() || `native sampler exited with code ${code}`;
     logNativeSampler(`exit code=${code} sawFrame=${sawFrame} stderr=${stderr.trim()}`);
     if (!exiting) {
-      startSequentialEdgeCapture(stderr.trim() || `native sampler exited with code ${code}`);
+      requestRestart(reason, false);
     }
   });
 
@@ -298,6 +428,9 @@ function startNativeBorderSampler() {
         mode: "native-border",
         backend: message.backend || "dxgi-desktop-duplication",
         reason: "",
+        averageRadiusPx: message.averageRadiusPx || averageRadiusPx,
+        smoothingAlphaPercent: message.smoothingAlphaPercent || smoothingAlphaPercent,
+        deadband: message.deadband || deadband,
       });
       return;
     }
@@ -307,6 +440,7 @@ function startNativeBorderSampler() {
     }
 
     sawFrame = true;
+    nativeRestartAttempts = 0;
     if (!startNativeBorderSampler.loggedFirstFrame) {
       startNativeBorderSampler.loggedFirstFrame = true;
       logNativeSampler(`first-frame backend=${message.backend || ""} elapsedMs=${message.elapsedMs || 0}`);
@@ -318,10 +452,15 @@ function startNativeBorderSampler() {
       elapsedMs: message.elapsedMs || 0,
       physicalWidth: message.physicalWidth || 0,
       physicalHeight: message.physicalHeight || 0,
+      format: message.format || 0,
+      averageRadiusPx: message.averageRadiusPx || averageRadiusPx,
+      smoothingAlphaPercent: message.smoothingAlphaPercent || smoothingAlphaPercent,
+      deadband: message.deadband || deadband,
       contentBoundsActive: Boolean(message.contentBoundsActive),
       contentLeft: message.contentLeft || 0,
       contentRight: message.contentRight || 0,
-      reason: "",
+      displayActive: message.displayActive !== false,
+      reason: message.displayStatusReason || "",
     });
 
     const output = {};
@@ -372,9 +511,7 @@ function captureNext() {
 
 try {
   if (edgeCapture) {
-    if (!startNativeBorderSampler()) {
-      startSequentialEdgeCapture("native sampler unavailable");
-    }
+    startNativeBorderSampler();
   } else {
     startCaptureMultiScreens((frameMap) => {
       parentPort.postMessage(frameMap);

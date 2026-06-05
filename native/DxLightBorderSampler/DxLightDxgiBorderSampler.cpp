@@ -2,12 +2,15 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <lowlevelmonitorconfigurationapi.h>
+#include <physicalmonitorenumerationapi.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <sstream>
@@ -36,6 +39,9 @@ struct Options
     int height = 1;
     int samplingRate = 80;
     int edgeThicknessPx = 80;
+    int averageRadiusPx = 12;
+    int smoothingAlphaPercent = 35;
+    int deadband = 10;
     int edgeNumber = 3;
     int intervalMs = 50;
     int frames = 0;
@@ -104,6 +110,9 @@ static Options parseOptions(int argc, char** argv)
     options.height = std::max(1, parseInt(values, "height", options.height));
     options.samplingRate = clampInt(parseInt(values, "samplingRate", options.samplingRate), 20, 240);
     options.edgeThicknessPx = clampInt(parseInt(values, "edgeThicknessPx", options.samplingRate), 1, std::max(options.width, options.height));
+    options.averageRadiusPx = clampInt(parseInt(values, "averageRadiusPx", options.averageRadiusPx), 0, 80);
+    options.smoothingAlphaPercent = clampInt(parseInt(values, "smoothingAlphaPercent", options.smoothingAlphaPercent), 1, 100);
+    options.deadband = clampInt(parseInt(values, "deadband", options.deadband), 0, 96);
     options.edgeNumber = parseInt(values, "edgeNumber", options.edgeNumber) == 4 ? 4 : 3;
     options.intervalMs = clampInt(parseInt(values, "intervalMs", options.intervalMs), 8, 1000);
     options.frames = std::max(0, parseInt(values, "frames", options.frames));
@@ -127,6 +136,51 @@ static std::string escapeJson(const std::string& value)
     }
     return output.str();
 }
+
+static const char* hresultName(HRESULT hr)
+{
+    switch (hr)
+    {
+    case S_OK: return "S_OK";
+    case E_ACCESSDENIED: return "E_ACCESSDENIED";
+    case E_INVALIDARG: return "E_INVALIDARG";
+    case DXGI_ERROR_ACCESS_LOST: return "DXGI_ERROR_ACCESS_LOST";
+    case DXGI_ERROR_DEVICE_REMOVED: return "DXGI_ERROR_DEVICE_REMOVED";
+    case DXGI_ERROR_DEVICE_RESET: return "DXGI_ERROR_DEVICE_RESET";
+    case DXGI_ERROR_INVALID_CALL: return "DXGI_ERROR_INVALID_CALL";
+    case DXGI_ERROR_NOT_CURRENTLY_AVAILABLE: return "DXGI_ERROR_NOT_CURRENTLY_AVAILABLE";
+    case DXGI_ERROR_NOT_FOUND: return "DXGI_ERROR_NOT_FOUND";
+    case DXGI_ERROR_UNSUPPORTED: return "DXGI_ERROR_UNSUPPORTED";
+    case DXGI_ERROR_WAIT_TIMEOUT: return "DXGI_ERROR_WAIT_TIMEOUT";
+    default: return "HRESULT";
+    }
+}
+
+static std::string describeHresult(HRESULT hr)
+{
+    std::ostringstream output;
+    output << hresultName(hr) << " (0x"
+           << std::uppercase << std::hex << std::setw(8) << std::setfill('0')
+           << static_cast<uint32_t>(hr) << ")";
+    return output.str();
+}
+
+static bool isDuplicationSessionLoss(HRESULT hr)
+{
+    return hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET;
+}
+
+static bool shouldRetryDuplicateOutput(HRESULT hr)
+{
+    return hr != DXGI_ERROR_UNSUPPORTED && hr != E_INVALIDARG;
+}
+
+enum class MonitorPowerProbeResult
+{
+    Unknown,
+    On,
+    LowPower
+};
 
 static std::string base64Encode(const std::vector<uint8_t>& bytes)
 {
@@ -168,13 +222,165 @@ static int displayOrdinal(const std::string& displayId)
     return std::max(0, parsed - 1);
 }
 
+static bool wideEqualsIgnoreCase(const WCHAR* left, const WCHAR* right)
+{
+    return CompareStringOrdinal(left, -1, right, -1, TRUE) == CSTR_EQUAL;
+}
+
+static bool displayConfigTargetIsAvailable(const WCHAR* gdiDeviceName, std::string& reason)
+{
+    UINT32 pathCount = 0;
+    UINT32 modeCount = 0;
+    LONG result = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount);
+    if (result != ERROR_SUCCESS || pathCount == 0)
+    {
+        return true;
+    }
+
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+    result = QueryDisplayConfig(
+        QDC_ONLY_ACTIVE_PATHS,
+        &pathCount,
+        paths.data(),
+        &modeCount,
+        modes.data(),
+        nullptr);
+    if (result != ERROR_SUCCESS)
+    {
+        return true;
+    }
+
+    bool matchedSource = false;
+    for (UINT32 index = 0; index < pathCount; ++index)
+    {
+        const DISPLAYCONFIG_PATH_INFO& pathInfo = paths[index];
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName{};
+        sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        sourceName.header.size = sizeof(sourceName);
+        sourceName.header.adapterId = pathInfo.sourceInfo.adapterId;
+        sourceName.header.id = pathInfo.sourceInfo.id;
+
+        if (DisplayConfigGetDeviceInfo(&sourceName.header) != ERROR_SUCCESS ||
+            !wideEqualsIgnoreCase(sourceName.viewGdiDeviceName, gdiDeviceName))
+        {
+            continue;
+        }
+
+        matchedSource = true;
+        if ((pathInfo.flags & DISPLAYCONFIG_PATH_ACTIVE) == 0)
+        {
+            reason = "display path is not active";
+            return false;
+        }
+        if (!pathInfo.targetInfo.targetAvailable)
+        {
+            reason = "display target is not available";
+            return false;
+        }
+
+        DISPLAYCONFIG_TARGET_DEVICE_NAME targetName{};
+        targetName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+        targetName.header.size = sizeof(targetName);
+        targetName.header.adapterId = pathInfo.targetInfo.adapterId;
+        targetName.header.id = pathInfo.targetInfo.id;
+        if (DisplayConfigGetDeviceInfo(&targetName.header) == ERROR_SUCCESS &&
+            targetName.monitorFriendlyDeviceName[0] == L'\0' &&
+            targetName.monitorDevicePath[0] == L'\0')
+        {
+            reason = "display target has no connected monitor";
+            return false;
+        }
+
+        return true;
+    }
+
+    if (!matchedSource)
+    {
+        reason = "display source is not active";
+        return false;
+    }
+    return true;
+}
+
+static std::string hexMonitorPowerMode(DWORD value)
+{
+    std::ostringstream output;
+    output << "0x"
+           << std::uppercase << std::hex << std::setw(2) << std::setfill('0')
+           << value;
+    return output.str();
+}
+
+static bool isKnownLowPowerMonitorMode(DWORD value)
+{
+    return value >= 0x02 && value <= 0x05;
+}
+
+static MonitorPowerProbeResult queryPhysicalMonitorPower(HMONITOR monitor, DWORD& powerMode)
+{
+    if (!monitor)
+    {
+        return MonitorPowerProbeResult::Unknown;
+    }
+
+    DWORD physicalMonitorCount = 0;
+    if (!GetNumberOfPhysicalMonitorsFromHMONITOR(monitor, &physicalMonitorCount) ||
+        physicalMonitorCount == 0)
+    {
+        return MonitorPowerProbeResult::Unknown;
+    }
+
+    std::vector<PHYSICAL_MONITOR> physicalMonitors(physicalMonitorCount);
+    if (!GetPhysicalMonitorsFromHMONITOR(monitor, physicalMonitorCount, physicalMonitors.data()))
+    {
+        return MonitorPowerProbeResult::Unknown;
+    }
+
+    MonitorPowerProbeResult result = MonitorPowerProbeResult::Unknown;
+    DWORD lowPowerMode = 0;
+    for (const PHYSICAL_MONITOR& physicalMonitor : physicalMonitors)
+    {
+        DWORD currentValue = 0;
+        DWORD maximumValue = 0;
+        MC_VCP_CODE_TYPE codeType{};
+        if (!GetVCPFeatureAndVCPFeatureReply(
+            physicalMonitor.hPhysicalMonitor,
+            0xD6,
+            &codeType,
+            &currentValue,
+            &maximumValue))
+        {
+            continue;
+        }
+
+        if (currentValue == 0x01)
+        {
+            result = MonitorPowerProbeResult::On;
+            break;
+        }
+        if (isKnownLowPowerMonitorMode(currentValue))
+        {
+            result = MonitorPowerProbeResult::LowPower;
+            lowPowerMode = currentValue;
+        }
+    }
+
+    DestroyPhysicalMonitors(physicalMonitorCount, physicalMonitors.data());
+    if (result == MonitorPowerProbeResult::LowPower)
+    {
+        powerMode = lowPowerMode;
+    }
+    return result;
+}
+
 static OutputSelection selectOutput(const Options& options)
 {
     IDXGIFactory1* factory = nullptr;
     HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory));
     if (FAILED(hr))
     {
-        throw std::runtime_error("CreateDXGIFactory1 failed");
+        throw std::runtime_error("CreateDXGIFactory1 failed: " + describeHresult(hr));
     }
 
     const int wantedOrdinal = displayOrdinal(options.displayId);
@@ -234,34 +440,30 @@ public:
           rows_(ceilDiv(options.height, options.samplingRate)),
           horizontalBandRows_(clampInt(ceilDiv(options.edgeThicknessPx, options.samplingRate), 1, rows_)),
           verticalBandCols_(clampInt(ceilDiv(options.edgeThicknessPx, options.samplingRate), 1, cols_)),
-          rgb_(cols_ * rows_ * 3)
+          rgb_(cols_ * rows_ * 3),
+          previousRgb_(cols_ * rows_ * 3)
     {
-        selection_ = selectOutput(options);
-        const RECT& rect = selection_.desc.DesktopCoordinates;
-        physicalWidth_ = std::max(1L, rect.right - rect.left);
-        physicalHeight_ = std::max(1L, rect.bottom - rect.top);
-        scaleX_ = static_cast<double>(physicalWidth_) / std::max(1, options.width);
-        scaleY_ = static_cast<double>(physicalHeight_) / std::max(1, options.height);
+        refreshOutputSelection();
         initializeDevice();
     }
 
     ~DxgiSampler()
     {
-        releaseCom(duplication_);
-        releaseCom(context_);
-        releaseCom(device_);
+        releaseDeviceResources();
         releaseCom(selection_.output);
         releaseCom(selection_.adapter);
-        for (auto& texture : staging_)
-        {
-            releaseCom(texture);
-        }
     }
 
     int cols() const { return cols_; }
     int rows() const { return rows_; }
     int physicalWidth() const { return physicalWidth_; }
     int physicalHeight() const { return physicalHeight_; }
+    DXGI_FORMAT format() const { return format_; }
+    int averageRadiusPx() const { return options_.averageRadiusPx; }
+    int smoothingAlphaPercent() const { return options_.smoothingAlphaPercent; }
+    int deadband() const { return options_.deadband; }
+    bool displayActive() const { return displayActive_; }
+    const std::string& displayStatusReason() const { return displayStatusReason_; }
     bool contentBoundsActive() const { return lastContentBounds_.active; }
     int contentBoundsLeft() const { return lastContentBounds_.left; }
     int contentBoundsRight() const { return lastContentBounds_.right; }
@@ -275,9 +477,37 @@ public:
         {
             if (hr == DXGI_ERROR_WAIT_TIMEOUT)
             {
+                std::string reason;
+                if (!selectedOutputReadyForFrame(reason))
+                {
+                    std::cerr << "Blanking DXGI frame because selected output is inactive: "
+                              << reason << std::endl;
+                    return blankFrame(reason);
+                }
+                displayActive_ = true;
+                displayStatusReason_.clear();
                 return rgb_;
             }
-            throw std::runtime_error("AcquireNextFrame failed");
+            if (isDuplicationSessionLoss(hr))
+            {
+                const std::string reason = "duplication session lost: " + describeHresult(hr);
+                std::cerr << "Recovering DXGI duplication after AcquireNextFrame failed: "
+                          << describeHresult(hr) << std::endl;
+                blankFrame(reason);
+                resetDeviceResources();
+                return rgb_;
+            }
+            throw std::runtime_error("AcquireNextFrame failed: " + describeHresult(hr));
+        }
+
+        std::string inactiveReason;
+        if (!selectedOutputReadyForFrame(inactiveReason))
+        {
+            releaseCom(resource);
+            duplication_->ReleaseFrame();
+            std::cerr << "Blanking DXGI frame because selected output is inactive: "
+                      << inactiveReason << std::endl;
+            return blankFrame(inactiveReason);
         }
 
         ID3D11Texture2D* frame = nullptr;
@@ -286,12 +516,13 @@ public:
         if (FAILED(hr))
         {
             duplication_->ReleaseFrame();
-            throw std::runtime_error("Frame QueryInterface failed");
+            throw std::runtime_error("Frame QueryInterface failed: " + describeHresult(hr));
         }
 
         D3D11_TEXTURE2D_DESC frameDesc{};
         frame->GetDesc(&frameDesc);
         format_ = frameDesc.Format;
+        ensureSupportedFormat();
 
         try
         {
@@ -313,6 +544,9 @@ public:
                 const std::vector<uint8_t> bottomLine = readHorizontalLine(frame, bottomY(), horizontalLeft, horizontalRight);
                 writeHorizontalBand(bottomLine, rows_ - horizontalBandRows_, rows_);
             }
+            smoothFrame();
+            displayActive_ = true;
+            displayStatusReason_.clear();
         }
         catch (...)
         {
@@ -361,9 +595,147 @@ private:
     int physicalHeight_ = 1;
     double scaleX_ = 1.0;
     double scaleY_ = 1.0;
+    int averageRadiusX_ = 0;
+    int averageRadiusY_ = 0;
     std::vector<uint8_t> rgb_;
+    std::vector<uint8_t> previousRgb_;
+    bool hasPreviousRgb_ = false;
+    bool displayActive_ = true;
+    std::string displayStatusReason_;
+    bool monitorPowerProbeEverSucceeded_ = false;
+    int monitorPowerProbeFailureCount_ = 0;
+    std::chrono::steady_clock::time_point nextMonitorPowerProbeAt_{};
     int contentBoundsHoldFrames_ = 0;
     ContentBounds lastContentBounds_;
+
+    void releaseStagingTextures()
+    {
+        for (auto& texture : staging_)
+        {
+            releaseCom(texture);
+        }
+    }
+
+    void releaseDuplicationResources()
+    {
+        releaseCom(duplication_);
+        releaseCom(output1_);
+        releaseStagingTextures();
+    }
+
+    void releaseDeviceResources()
+    {
+        releaseDuplicationResources();
+        releaseCom(context_);
+        releaseCom(device_);
+    }
+
+    void updatePhysicalMetrics()
+    {
+        const RECT& rect = selection_.desc.DesktopCoordinates;
+        physicalWidth_ = std::max(1L, rect.right - rect.left);
+        physicalHeight_ = std::max(1L, rect.bottom - rect.top);
+        scaleX_ = static_cast<double>(physicalWidth_) / std::max(1, options_.width);
+        scaleY_ = static_cast<double>(physicalHeight_) / std::max(1, options_.height);
+        averageRadiusX_ = clampInt(static_cast<int>(std::round(options_.averageRadiusPx * scaleX_)), 0, std::max(0, physicalWidth_ / 8));
+        averageRadiusY_ = clampInt(static_cast<int>(std::round(options_.averageRadiusPx * scaleY_)), 0, std::max(0, physicalHeight_ / 8));
+    }
+
+    void refreshOutputSelection()
+    {
+        releaseCom(selection_.output);
+        releaseCom(selection_.adapter);
+        selection_ = selectOutput(options_);
+        updatePhysicalMetrics();
+    }
+
+    bool isSelectedOutputAvailable(std::string& reason)
+    {
+        DXGI_OUTPUT_DESC desc{};
+        HRESULT hr = selection_.output->GetDesc(&desc);
+        if (FAILED(hr))
+        {
+            reason = "selected output description is unavailable: " + describeHresult(hr);
+            return false;
+        }
+
+        selection_.desc = desc;
+        updatePhysicalMetrics();
+        if (!desc.AttachedToDesktop)
+        {
+            reason = "selected output is not attached to the desktop";
+            return false;
+        }
+
+        if (!displayConfigTargetIsAvailable(desc.DeviceName, reason))
+        {
+            return false;
+        }
+
+        DWORD powerMode = 0;
+        const MonitorPowerProbeResult powerProbe = queryPhysicalMonitorPower(desc.Monitor, powerMode);
+        if (powerProbe == MonitorPowerProbeResult::On)
+        {
+            monitorPowerProbeEverSucceeded_ = true;
+            monitorPowerProbeFailureCount_ = 0;
+            return true;
+        }
+        if (powerProbe == MonitorPowerProbeResult::LowPower)
+        {
+            monitorPowerProbeEverSucceeded_ = true;
+            monitorPowerProbeFailureCount_ = 0;
+            reason = "physical monitor power mode is low-power (" + hexMonitorPowerMode(powerMode) + ")";
+            return false;
+        }
+
+        if (monitorPowerProbeEverSucceeded_)
+        {
+            monitorPowerProbeFailureCount_ += 1;
+            if (monitorPowerProbeFailureCount_ >= 2)
+            {
+                reason = "physical monitor power state is unreachable after previously responding";
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool selectedOutputReadyForFrame(std::string& reason)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < nextMonitorPowerProbeAt_)
+        {
+            if (!displayActive_)
+            {
+                reason = displayStatusReason_.empty() ? "selected output is inactive" : displayStatusReason_;
+                return false;
+            }
+            return true;
+        }
+
+        nextMonitorPowerProbeAt_ = now + std::chrono::milliseconds(1000);
+        return isSelectedOutputAvailable(reason);
+    }
+
+    const std::vector<uint8_t>& blankFrame(const std::string& reason)
+    {
+        std::fill(rgb_.begin(), rgb_.end(), 0);
+        previousRgb_ = rgb_;
+        hasPreviousRgb_ = true;
+        displayActive_ = false;
+        displayStatusReason_ = reason;
+        contentBoundsHoldFrames_ = 0;
+        lastContentBounds_ = ContentBounds{};
+        return rgb_;
+    }
+
+    void resetDeviceResources()
+    {
+        releaseDeviceResources();
+        refreshOutputSelection();
+        initializeDevice();
+    }
 
     void initializeDevice()
     {
@@ -373,35 +745,58 @@ private:
             D3D_FEATURE_LEVEL_10_1,
             D3D_FEATURE_LEVEL_10_0,
         };
-        D3D_FEATURE_LEVEL selectedLevel{};
-        HRESULT hr = D3D11CreateDevice(
-            selection_.adapter,
-            D3D_DRIVER_TYPE_UNKNOWN,
-            nullptr,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            levels,
-            static_cast<UINT>(sizeof(levels) / sizeof(levels[0])),
-            D3D11_SDK_VERSION,
-            &device_,
-            &selectedLevel,
-            &context_);
-        if (FAILED(hr))
+
+        releaseDuplicationResources();
+
+        if (!device_)
         {
-            throw std::runtime_error("D3D11CreateDevice failed");
+            D3D_FEATURE_LEVEL selectedLevel{};
+            HRESULT hr = D3D11CreateDevice(
+                selection_.adapter,
+                D3D_DRIVER_TYPE_UNKNOWN,
+                nullptr,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                levels,
+                static_cast<UINT>(sizeof(levels) / sizeof(levels[0])),
+                D3D11_SDK_VERSION,
+                &device_,
+                &selectedLevel,
+                &context_);
+            if (FAILED(hr))
+            {
+                throw std::runtime_error("D3D11CreateDevice failed: " + describeHresult(hr));
+            }
         }
 
-        hr = selection_.output->QueryInterface(__uuidof(IDXGIOutput1), reinterpret_cast<void**>(&output1_));
-        if (FAILED(hr))
+        HRESULT duplicateHr = S_OK;
+        const int maxAttempts = 20;
+        for (int attempt = 1; attempt <= maxAttempts; ++attempt)
         {
-            throw std::runtime_error("IDXGIOutput1 QueryInterface failed");
+            HRESULT hr = selection_.output->QueryInterface(__uuidof(IDXGIOutput1), reinterpret_cast<void**>(&output1_));
+            if (FAILED(hr))
+            {
+                throw std::runtime_error("IDXGIOutput1 QueryInterface failed: " + describeHresult(hr));
+            }
+
+            duplicateHr = output1_->DuplicateOutput(device_, &duplication_);
+            releaseCom(output1_);
+            if (SUCCEEDED(duplicateHr))
+            {
+                return;
+            }
+
+            releaseCom(duplication_);
+            if (!shouldRetryDuplicateOutput(duplicateHr) || attempt >= maxAttempts)
+            {
+                break;
+            }
+
+            std::cerr << "DuplicateOutput retry attempt=" << attempt
+                      << " reason=" << describeHresult(duplicateHr) << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::min(1000, 100 * attempt)));
         }
 
-        hr = output1_->DuplicateOutput(device_, &duplication_);
-        releaseCom(output1_);
-        if (FAILED(hr))
-        {
-            throw std::runtime_error("DuplicateOutput failed");
-        }
+        throw std::runtime_error("DuplicateOutput failed: " + describeHresult(duplicateHr));
     }
 
     int edgePhysicalX() const
@@ -446,8 +841,7 @@ private:
         const bool sideBarsDetected =
             isMostlyBlack(leftEdge) &&
             isMostlyBlack(rightEdge) &&
-            !isMostlyBlack(leftContent) &&
-            !isMostlyBlack(rightContent);
+            (!isMostlyBlack(leftContent) || !isMostlyBlack(rightContent));
         if (sideBarsDetected)
         {
             contentBoundsHoldFrames_ = 120;
@@ -520,13 +914,17 @@ private:
         sourceLeft = clampInt(sourceLeft, 0, physicalWidth_ - 1);
         sourceRight = clampInt(sourceRight, sourceLeft + 1, physicalWidth_);
         const int sourceWidth = std::max(1, sourceRight - sourceLeft);
-        ID3D11Texture2D* staging = ensureStaging(y <= physicalHeight_ / 2 ? TopLine : BottomLine, sourceWidth, 1);
+        const int centerY = clampInt(y, 0, physicalHeight_ - 1);
+        const int sourceTop = clampInt(centerY - averageRadiusY_, 0, physicalHeight_ - 1);
+        const int sourceBottom = clampInt(centerY + averageRadiusY_ + 1, sourceTop + 1, physicalHeight_);
+        const int sourceHeight = sourceBottom - sourceTop;
+        ID3D11Texture2D* staging = ensureStaging(y <= physicalHeight_ / 2 ? TopLine : BottomLine, sourceWidth, sourceHeight);
         D3D11_BOX box{};
         box.left = static_cast<UINT>(sourceLeft);
-        box.top = static_cast<UINT>(clampInt(y, 0, physicalHeight_ - 1));
+        box.top = static_cast<UINT>(sourceTop);
         box.front = 0;
         box.right = static_cast<UINT>(sourceRight);
-        box.bottom = box.top + 1;
+        box.bottom = static_cast<UINT>(sourceBottom);
         box.back = 1;
         context_->CopySubresourceRegion(staging, 0, 0, 0, 0, frame, 0, &box);
 
@@ -542,7 +940,14 @@ private:
         for (int col = 0; col < cols_; ++col)
         {
             const int sourceX = clampInt(static_cast<int>(std::round(((col + 0.5) * sourceWidth) / cols_)), 0, sourceWidth - 1);
-            readPixel(data + sourceX * 4, &line[col * 3]);
+            readAveragePixel(
+                data,
+                mapped.RowPitch,
+                clampInt(sourceX - averageRadiusX_, 0, sourceWidth - 1),
+                clampInt(sourceX + averageRadiusX_ + 1, sourceX + 1, sourceWidth),
+                0,
+                sourceHeight,
+                &line[col * 3]);
         }
         context_->Unmap(staging, 0);
         return line;
@@ -550,12 +955,16 @@ private:
 
     std::vector<uint8_t> readVerticalLine(ID3D11Texture2D* frame, int x, StagingSlot slot)
     {
-        ID3D11Texture2D* staging = ensureStaging(slot, 1, physicalHeight_);
+        const int centerX = clampInt(x, 0, physicalWidth_ - 1);
+        const int sourceLeft = clampInt(centerX - averageRadiusX_, 0, physicalWidth_ - 1);
+        const int sourceRight = clampInt(centerX + averageRadiusX_ + 1, sourceLeft + 1, physicalWidth_);
+        const int sourceWidth = sourceRight - sourceLeft;
+        ID3D11Texture2D* staging = ensureStaging(slot, sourceWidth, physicalHeight_);
         D3D11_BOX box{};
-        box.left = static_cast<UINT>(clampInt(x, 0, physicalWidth_ - 1));
+        box.left = static_cast<UINT>(sourceLeft);
         box.top = 0;
         box.front = 0;
-        box.right = box.left + 1;
+        box.right = static_cast<UINT>(sourceRight);
         box.bottom = static_cast<UINT>(physicalHeight_);
         box.back = 1;
         context_->CopySubresourceRegion(staging, 0, 0, 0, 0, frame, 0, &box);
@@ -572,7 +981,14 @@ private:
         for (int row = 0; row < rows_; ++row)
         {
             const int sourceY = clampInt(static_cast<int>(std::round(((row + 0.5) * physicalHeight_) / rows_)), 0, physicalHeight_ - 1);
-            readPixel(data + sourceY * mapped.RowPitch, &line[row * 3]);
+            readAveragePixel(
+                data,
+                mapped.RowPitch,
+                0,
+                sourceWidth,
+                clampInt(sourceY - averageRadiusY_, 0, physicalHeight_ - 1),
+                clampInt(sourceY + averageRadiusY_ + 1, sourceY + 1, physicalHeight_),
+                &line[row * 3]);
         }
         context_->Unmap(staging, 0);
         return line;
@@ -612,19 +1028,198 @@ private:
         }
     }
 
+    void readAveragePixel(const uint8_t* data, UINT rowPitch, int left, int right, int top, int bottom, uint8_t* output) const
+    {
+        int red = 0;
+        int green = 0;
+        int blue = 0;
+        int samples = 0;
+        uint8_t pixelRgb[3]{};
+        const int stride = pixelStride();
+
+        for (int row = top; row < bottom; ++row)
+        {
+            const uint8_t* rowData = data + static_cast<size_t>(row) * rowPitch;
+            for (int col = left; col < right; ++col)
+            {
+                readPixel(rowData + static_cast<size_t>(col) * stride, pixelRgb);
+                red += pixelRgb[0];
+                green += pixelRgb[1];
+                blue += pixelRgb[2];
+                samples += 1;
+            }
+        }
+
+        if (samples <= 0)
+        {
+            output[0] = 0;
+            output[1] = 0;
+            output[2] = 0;
+            return;
+        }
+
+        output[0] = static_cast<uint8_t>((red + samples / 2) / samples);
+        output[1] = static_cast<uint8_t>((green + samples / 2) / samples);
+        output[2] = static_cast<uint8_t>((blue + samples / 2) / samples);
+    }
+
+    void smoothFrame()
+    {
+        if (!hasPreviousRgb_)
+        {
+            previousRgb_ = rgb_;
+            hasPreviousRgb_ = true;
+            return;
+        }
+
+        const int currentWeight = options_.smoothingAlphaPercent;
+        const int previousWeight = 100 - currentWeight;
+        for (size_t index = 0; index + 2 < rgb_.size(); index += 3)
+        {
+            const int redDelta = std::abs(static_cast<int>(rgb_[index]) - static_cast<int>(previousRgb_[index]));
+            const int greenDelta = std::abs(static_cast<int>(rgb_[index + 1]) - static_cast<int>(previousRgb_[index + 1]));
+            const int blueDelta = std::abs(static_cast<int>(rgb_[index + 2]) - static_cast<int>(previousRgb_[index + 2]));
+            if (redDelta + greenDelta + blueDelta <= options_.deadband)
+            {
+                rgb_[index] = previousRgb_[index];
+                rgb_[index + 1] = previousRgb_[index + 1];
+                rgb_[index + 2] = previousRgb_[index + 2];
+                continue;
+            }
+
+            rgb_[index] = static_cast<uint8_t>((previousRgb_[index] * previousWeight + rgb_[index] * currentWeight + 50) / 100);
+            rgb_[index + 1] = static_cast<uint8_t>((previousRgb_[index + 1] * previousWeight + rgb_[index + 1] * currentWeight + 50) / 100);
+            rgb_[index + 2] = static_cast<uint8_t>((previousRgb_[index + 2] * previousWeight + rgb_[index + 2] * currentWeight + 50) / 100);
+        }
+
+        previousRgb_ = rgb_;
+    }
+
+    static uint16_t readLe16(const uint8_t* pixel)
+    {
+        return static_cast<uint16_t>(pixel[0]) | (static_cast<uint16_t>(pixel[1]) << 8);
+    }
+
+    static uint32_t readLe32(const uint8_t* pixel)
+    {
+        return static_cast<uint32_t>(pixel[0]) |
+            (static_cast<uint32_t>(pixel[1]) << 8) |
+            (static_cast<uint32_t>(pixel[2]) << 16) |
+            (static_cast<uint32_t>(pixel[3]) << 24);
+    }
+
+    static uint8_t unorm10ToByte(uint32_t value)
+    {
+        return static_cast<uint8_t>((value * 255 + 511) / 1023);
+    }
+
+    static uint8_t unorm16ToByte(uint16_t value)
+    {
+        return static_cast<uint8_t>((static_cast<uint32_t>(value) * 255 + 32767) / 65535);
+    }
+
+    static float halfToFloat(uint16_t value)
+    {
+        const int sign = (value & 0x8000) ? -1 : 1;
+        const int exponent = (value >> 10) & 0x1F;
+        const int mantissa = value & 0x03FF;
+
+        if (exponent == 0)
+        {
+            if (mantissa == 0)
+            {
+                return sign < 0 ? -0.0f : 0.0f;
+            }
+            return sign * std::ldexp(static_cast<float>(mantissa) / 1024.0f, -14);
+        }
+
+        if (exponent == 31)
+        {
+            return sign < 0 ? -1.0f : 1.0f;
+        }
+
+        return sign * std::ldexp(1.0f + static_cast<float>(mantissa) / 1024.0f, exponent - 15);
+    }
+
+    static uint8_t linearToSrgbByte(float value)
+    {
+        const float clamped = std::max(0.0f, std::min(1.0f, value));
+        const float encoded = clamped <= 0.0031308f
+            ? clamped * 12.92f
+            : 1.055f * std::pow(clamped, 1.0f / 2.4f) - 0.055f;
+        return static_cast<uint8_t>(std::round(std::max(0.0f, std::min(1.0f, encoded)) * 255.0f));
+    }
+
+    int pixelStride() const
+    {
+        switch (format_)
+        {
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+        case DXGI_FORMAT_R16G16B16A16_UNORM:
+            return 8;
+        default:
+            return 4;
+        }
+    }
+
+    void ensureSupportedFormat() const
+    {
+        switch (format_)
+        {
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        case DXGI_FORMAT_B8G8R8X8_UNORM:
+        case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        case DXGI_FORMAT_R10G10B10A2_UNORM:
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+        case DXGI_FORMAT_R16G16B16A16_UNORM:
+            return;
+        default:
+            throw std::runtime_error("Unsupported DXGI frame format: " + std::to_string(static_cast<int>(format_)));
+        }
+    }
+
     void readPixel(const uint8_t* pixel, uint8_t* output) const
     {
-        if (format_ == DXGI_FORMAT_R8G8B8A8_UNORM || format_ == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
+        switch (format_)
         {
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
             output[0] = pixel[0];
             output[1] = pixel[1];
             output[2] = pixel[2];
             return;
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        case DXGI_FORMAT_B8G8R8X8_UNORM:
+        case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+            output[0] = pixel[2];
+            output[1] = pixel[1];
+            output[2] = pixel[0];
+            return;
+        case DXGI_FORMAT_R10G10B10A2_UNORM:
+        {
+            const uint32_t packed = readLe32(pixel);
+            output[0] = unorm10ToByte(packed & 0x3FF);
+            output[1] = unorm10ToByte((packed >> 10) & 0x3FF);
+            output[2] = unorm10ToByte((packed >> 20) & 0x3FF);
+            return;
         }
-
-        output[0] = pixel[2];
-        output[1] = pixel[1];
-        output[2] = pixel[0];
+        case DXGI_FORMAT_R16G16B16A16_UNORM:
+            output[0] = unorm16ToByte(readLe16(pixel));
+            output[1] = unorm16ToByte(readLe16(pixel + 2));
+            output[2] = unorm16ToByte(readLe16(pixel + 4));
+            return;
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+            output[0] = linearToSrgbByte(halfToFloat(readLe16(pixel)));
+            output[1] = linearToSrgbByte(halfToFloat(readLe16(pixel + 2)));
+            output[2] = linearToSrgbByte(halfToFloat(readLe16(pixel + 4)));
+            return;
+        default:
+            throw std::runtime_error("Unsupported DXGI frame format: " + std::to_string(static_cast<int>(format_)));
+        }
     }
 };
 
@@ -640,7 +1235,11 @@ int main(int argc, char** argv)
                   << " interval=" << options.intervalMs << "ms" << std::endl;
         std::cout << "{\"type\":\"ready\",\"backend\":\"dxgi-desktop-duplication\",\"displayId\":\""
                   << escapeJson(options.displayId) << "\",\"physicalWidth\":" << sampler.physicalWidth()
-                  << ",\"physicalHeight\":" << sampler.physicalHeight() << "}" << std::endl;
+                  << ",\"physicalHeight\":" << sampler.physicalHeight()
+                  << ",\"averageRadiusPx\":" << sampler.averageRadiusPx()
+                  << ",\"smoothingAlphaPercent\":" << sampler.smoothingAlphaPercent()
+                  << ",\"deadband\":" << sampler.deadband()
+                  << "}" << std::endl;
 
         int frameCount = 0;
         while (options.frames <= 0 || frameCount < options.frames)
@@ -656,6 +1255,12 @@ int main(int argc, char** argv)
                       << ",\"height\":" << options.height
                       << ",\"physicalWidth\":" << sampler.physicalWidth()
                       << ",\"physicalHeight\":" << sampler.physicalHeight()
+                      << ",\"format\":" << static_cast<int>(sampler.format())
+                      << ",\"averageRadiusPx\":" << sampler.averageRadiusPx()
+                      << ",\"smoothingAlphaPercent\":" << sampler.smoothingAlphaPercent()
+                      << ",\"deadband\":" << sampler.deadband()
+                      << ",\"displayActive\":" << (sampler.displayActive() ? "true" : "false")
+                      << ",\"displayStatusReason\":\"" << escapeJson(sampler.displayStatusReason()) << "\""
                       << ",\"cols\":" << sampler.cols()
                       << ",\"rows\":" << sampler.rows()
                       << ",\"elapsedMs\":" << elapsedMs

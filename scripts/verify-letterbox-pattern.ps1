@@ -4,7 +4,9 @@ param(
     [int]$PhysicalHeight = 2160,
     [int]$SamplingRate = 80,
     [int]$EdgeThicknessPx = 240,
-    [int]$Frames = 2
+    [int]$Frames = 3,
+    [ValidateSet("solid", "left-only", "right-only")]
+    [string]$Pattern = "solid"
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,22 +32,37 @@ $form.TopMost = $true
 $form.BackColor = [System.Drawing.Color]::Black
 $form.ShowInTaskbar = $false
 
-$panel = New-Object System.Windows.Forms.Panel
-$panel.Left = $inset
-$panel.Top = 0
-$panel.Width = $activeWidth
-$panel.Height = $screen.Height
-$panel.BackColor = [System.Drawing.Color]::FromArgb(32, 180, 120)
-$form.Controls.Add($panel)
+function Add-Panel([int]$Left, [int]$Top, [int]$Width, [int]$Height, [System.Drawing.Color]$Color) {
+    $panel = New-Object System.Windows.Forms.Panel
+    $panel.Left = $Left
+    $panel.Top = $Top
+    $panel.Width = $Width
+    $panel.Height = $Height
+    $panel.BackColor = $Color
+    $form.Controls.Add($panel)
+}
+
+$contentColor = [System.Drawing.Color]::FromArgb(32, 180, 120)
+$stripeWidth = [Math]::Max($EdgeThicknessPx, [Math]::Round($activeWidth * 0.12))
+switch ($Pattern) {
+    "solid" {
+        Add-Panel -Left $inset -Top 0 -Width $activeWidth -Height $screen.Height -Color $contentColor
+    }
+    "left-only" {
+        Add-Panel -Left $inset -Top 0 -Width $stripeWidth -Height $screen.Height -Color $contentColor
+    }
+    "right-only" {
+        Add-Panel -Left ($inset + $activeWidth - $stripeWidth) -Top 0 -Width $stripeWidth -Height $screen.Height -Color $contentColor
+    }
+}
 
 try {
     $form.Show()
     [System.Windows.Forms.Application]::DoEvents()
     Start-Sleep -Milliseconds 500
 
-    $stdoutPath = Join-Path $env:TEMP "dxlight-letterbox-sampler.out"
-    $stderrPath = Join-Path $env:TEMP "dxlight-letterbox-sampler.err"
-    Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    $stdoutPath = [System.IO.Path]::GetTempFileName()
+    $stderrPath = [System.IO.Path]::GetTempFileName()
     $arguments = @(
         "--displayId", $DisplayId,
         "--width", $PhysicalWidth,
@@ -64,6 +81,7 @@ try {
     }
 
     $frame = $null
+    $frameBytes = $null
     $frameResults = @()
     $stdout = if (Test-Path $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { "" }
     foreach ($line in ($stdout -split "`n")) {
@@ -73,9 +91,6 @@ try {
         }
         $message = $trimmed | ConvertFrom-Json
         if ($message.type -eq "frame") {
-            if ($null -eq $frame) {
-                $frame = $message
-            }
             $bytes = [Convert]::FromBase64String([string]$message.colors)
             $hasNonZeroByte = $false
             foreach ($byte in $bytes) {
@@ -83,6 +98,10 @@ try {
                     $hasNonZeroByte = $true
                     break
                 }
+            }
+            if ($null -eq $frame -or $hasNonZeroByte) {
+                $frame = $message
+                $frameBytes = $bytes
             }
             $frameResults += [PSCustomObject]@{
                 Signature = [string]$message.signature
@@ -97,12 +116,28 @@ try {
         throw "No sampler frame result. $stderr"
     }
 
+    function Test-GridColumnNonZero([byte[]]$Bytes, [int]$Cols, [int]$Rows, [int]$Column) {
+        for ($row = 0; $row -lt $Rows; $row += 1) {
+            $offset = 3 * ($row * $Cols + $Column)
+            if ($Bytes[$offset] -ne 0 -or $Bytes[$offset + 1] -ne 0 -or $Bytes[$offset + 2] -ne 0) {
+                return $true
+            }
+        }
+        return $false
+    }
+
+    $cols = [int]$frame.cols
+    $rows = [int]$frame.rows
+
     [PSCustomObject]@{
         LogicalScreen = "$($screen.Width)x$($screen.Height)"
         LogicalPatternInset = $inset
+        Pattern = $Pattern
         ContentBoundsActive = [bool]$frame.contentBoundsActive
         ContentLeft = [int]$frame.contentLeft
         ContentRight = [int]$frame.contentRight
+        LeftColumnNonZero = Test-GridColumnNonZero -Bytes $frameBytes -Cols $cols -Rows $rows -Column 0
+        RightColumnNonZero = Test-GridColumnNonZero -Bytes $frameBytes -Cols $cols -Rows $rows -Column ($cols - 1)
         ElapsedMs = [Math]::Round([double]$frame.elapsedMs, 3)
         FrameCount = $frameResults.Count
         NonZeroFrameCount = @($frameResults | Where-Object { $_.NonZero }).Count

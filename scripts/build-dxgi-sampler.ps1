@@ -18,13 +18,33 @@ if (-not (Test-Path $source)) {
     throw "Missing source: $source"
 }
 
+function Get-Sha256Hash([string] $Path) {
+    $getFileHash = Get-Command Get-FileHash -ErrorAction SilentlyContinue
+    if ($getFileHash) {
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = $sha256.ComputeHash($stream)
+            return -join ($hash | ForEach-Object { $_.ToString("x2") })
+        } finally {
+            $sha256.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 if (-not (Test-Path $zig)) {
     New-Item -ItemType Directory -Force -Path (Join-Path $root ".tmp") | Out-Null
     if (-not (Test-Path $zigZip)) {
         Invoke-WebRequest -Uri $zigUrl -OutFile $zigZip
     }
 
-    $actualHash = (Get-FileHash $zigZip -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualHash = Get-Sha256Hash $zigZip
     if ($actualHash -ne $zigSha256) {
         throw "Zig archive hash mismatch: $actualHash"
     }
@@ -58,6 +78,8 @@ $optimize = if ($Configuration -ieq "Debug") { "-O0" } else { "-O2" }
     $source `
     -ld3d11 `
     -ldxgi `
+    -ldxva2 `
+    -luser32 `
     -lole32
 
 if ($LASTEXITCODE -ne 0) {
