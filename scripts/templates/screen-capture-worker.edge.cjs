@@ -217,7 +217,7 @@ function postNativeStatus(reason, extra = {}) {
 }
 
 function isDisplayOffReason(reason) {
-  return /DXGI_ERROR_ACCESS_LOST|display target|display path|display source|physical monitor|selected output/i.test(String(reason || ""));
+  return /display target|display path|display source|physical monitor|selected output/i.test(String(reason || ""));
 }
 
 function postBlackFrame(reason, extra = {}) {
@@ -254,6 +254,7 @@ function startSequentialEdgeCapture(reason) {
     mode: "sequential-edge",
     backend: "quiklight-region-fallback",
     reason: reason || "",
+    displayActive: true,
   });
   buildRegions();
   schedule(0);

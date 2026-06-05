@@ -478,7 +478,7 @@ public:
             if (hr == DXGI_ERROR_WAIT_TIMEOUT)
             {
                 std::string reason;
-                if (!isSelectedOutputAvailable(reason))
+                if (!selectedOutputReadyForFrame(reason))
                 {
                     std::cerr << "Blanking DXGI frame because selected output is inactive: "
                               << reason << std::endl;
@@ -498,6 +498,16 @@ public:
                 return rgb_;
             }
             throw std::runtime_error("AcquireNextFrame failed: " + describeHresult(hr));
+        }
+
+        std::string inactiveReason;
+        if (!selectedOutputReadyForFrame(inactiveReason))
+        {
+            releaseCom(resource);
+            duplication_->ReleaseFrame();
+            std::cerr << "Blanking DXGI frame because selected output is inactive: "
+                      << inactiveReason << std::endl;
+            return blankFrame(inactiveReason);
         }
 
         ID3D11Texture2D* frame = nullptr;
@@ -537,7 +547,6 @@ public:
             smoothFrame();
             displayActive_ = true;
             displayStatusReason_.clear();
-            monitorPowerProbeFailureCount_ = 0;
         }
         catch (...)
         {
@@ -595,6 +604,7 @@ private:
     std::string displayStatusReason_;
     bool monitorPowerProbeEverSucceeded_ = false;
     int monitorPowerProbeFailureCount_ = 0;
+    std::chrono::steady_clock::time_point nextMonitorPowerProbeAt_{};
     int contentBoundsHoldFrames_ = 0;
     ContentBounds lastContentBounds_;
 
@@ -689,6 +699,23 @@ private:
         }
 
         return true;
+    }
+
+    bool selectedOutputReadyForFrame(std::string& reason)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < nextMonitorPowerProbeAt_)
+        {
+            if (!displayActive_)
+            {
+                reason = displayStatusReason_.empty() ? "selected output is inactive" : displayStatusReason_;
+                return false;
+            }
+            return true;
+        }
+
+        nextMonitorPowerProbeAt_ = now + std::chrono::milliseconds(1000);
+        return isSelectedOutputAvailable(reason);
     }
 
     const std::vector<uint8_t>& blankFrame(const std::string& reason)

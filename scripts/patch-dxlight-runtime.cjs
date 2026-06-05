@@ -481,6 +481,7 @@ function verifyExtractedApp(directory) {
     [worker, "native-border-status"],
     [worker, "scheduleNativeSamplerRestart"],
     [worker, "startSequentialEdgeCapture"],
+    [worker, "displayActive: true"],
     [worker, "native ready timeout"],
     [worker, "parentPort.postMessage"],
     [preload, "dxLightSyncDashboard"],
