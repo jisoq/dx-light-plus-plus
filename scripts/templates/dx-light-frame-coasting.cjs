@@ -152,7 +152,7 @@ function isFlatBlackFrame(frame) {
 
 function isProtectedCaptureReason(reason) {
   const value = String(reason || "");
-  if (isDuplicationSessionLossReason(value)) {
+  if (isDuplicationSessionLossReason(value) || isNativeFallbackReason(value)) {
     return false;
   }
   return /E_ACCESSDENIED|access denied|DuplicateOutput failed|AcquireNextFrame failed/i.test(value);
@@ -160,6 +160,10 @@ function isProtectedCaptureReason(reason) {
 
 function isDuplicationSessionLossReason(reason) {
   return /DXGI_ERROR_ACCESS_LOST|DXGI_ERROR_DEVICE_REMOVED|DXGI_ERROR_DEVICE_RESET/i.test(String(reason || ""));
+}
+
+function isNativeFallbackReason(reason) {
+  return /DXGI_ERROR_UNSUPPORTED|DXGI_ERROR_NOT_CURRENTLY_AVAILABLE|DXGI_ERROR_NOT_FOUND|E_INVALIDARG|native sampler not found|native sampler disabled/i.test(String(reason || ""));
 }
 
 function shouldCoastCaptureFrame(frame, reason, displayActive = true) {
@@ -233,6 +237,7 @@ module.exports = {
   createFrameCoaster,
   isDuplicationSessionLossReason,
   isFlatBlackFrame,
+  isNativeFallbackReason,
   isProtectedCaptureReason,
   shouldCoastCaptureFrame,
 };

@@ -6,6 +6,7 @@ const {
   createFrameCoaster,
   isDuplicationSessionLossReason,
   isFlatBlackFrame,
+  isNativeFallbackReason,
   isProtectedCaptureReason,
   shouldCoastCaptureFrame,
 } = require("./dx-light-frame-coasting.cjs");
@@ -66,14 +67,19 @@ describe("dx light frame coasting", () => {
   it("separates protected capture denial from normal DXGI session loss", () => {
     expect(isProtectedCaptureReason("DuplicateOutput failed: E_ACCESSDENIED")).toBe(true);
     expect(isProtectedCaptureReason("DuplicateOutput failed: DXGI_ERROR_INVALID_CALL")).toBe(true);
-    expect(isProtectedCaptureReason("DuplicateOutput failed: DXGI_ERROR_NOT_CURRENTLY_AVAILABLE")).toBe(true);
     expect(isProtectedCaptureReason("AcquireNextFrame failed: DXGI_ERROR_INVALID_CALL")).toBe(true);
     expect(isProtectedCaptureReason("AcquireNextFrame failed: DXGI_ERROR_ACCESS_LOST")).toBe(false);
     expect(isProtectedCaptureReason("DuplicateOutput failed: DXGI_ERROR_ACCESS_LOST")).toBe(false);
+    expect(isProtectedCaptureReason("DuplicateOutput failed: DXGI_ERROR_UNSUPPORTED")).toBe(false);
+    expect(isProtectedCaptureReason("DuplicateOutput failed: DXGI_ERROR_NOT_CURRENTLY_AVAILABLE")).toBe(false);
+    expect(isProtectedCaptureReason("DuplicateOutput failed: E_INVALIDARG")).toBe(false);
     expect(isDuplicationSessionLossReason("AcquireNextFrame failed: DXGI_ERROR_ACCESS_LOST")).toBe(true);
     expect(isDuplicationSessionLossReason("AcquireNextFrame failed: DXGI_ERROR_DEVICE_REMOVED")).toBe(true);
     expect(isDuplicationSessionLossReason("AcquireNextFrame failed: DXGI_ERROR_DEVICE_RESET")).toBe(true);
     expect(isDuplicationSessionLossReason("DuplicateOutput failed: E_ACCESSDENIED")).toBe(false);
+    expect(isNativeFallbackReason("DuplicateOutput failed: DXGI_ERROR_UNSUPPORTED")).toBe(true);
+    expect(isNativeFallbackReason("DuplicateOutput failed: DXGI_ERROR_NOT_CURRENTLY_AVAILABLE")).toBe(true);
+    expect(isNativeFallbackReason("DuplicateOutput failed: E_INVALIDARG")).toBe(true);
     expect(isProtectedCaptureReason("native sampler not found candidates=a|b")).toBe(false);
     expect(isProtectedCaptureReason("native sampler disabled by DX_LIGHT_NATIVE_BORDER=0")).toBe(false);
   });

@@ -2,7 +2,7 @@ import { type PointerEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { BrowserScreenCaptureProvider, ScreenCaptureService } from './capture/captureService';
 import { isScreenCapturePermissionError, screenCaptureStartMessage } from './capture/captureErrors';
 import { BridgeLightDeviceAdapter } from './device/bridgeDeviceAdapter';
-import { createSolidColorFrame } from './domain/ledFrame';
+import { createSolidColorFrame, isFlatBlackLedFrame } from './domain/ledFrame';
 import { createOrderedSamplingRegions } from './domain/ledLayout';
 import { AdaptiveOptimizer } from './domain/optimizer';
 import { domainToPreviewDomain, effectiveDisplayAreaPercent, previewFrameBounds, previewPointToFramePoint } from './domain/samplingFrame';
@@ -337,9 +337,10 @@ export default function App() {
 
     const ledFrame = sample.ledFrame;
     const displayColor = sample.color;
+    const suppressProtectedBlackSample = isFlatBlackLedFrame(ledFrame);
 
     let writeMs = 0;
-    const shouldSend = deviceConnected && frameIndexRef.current % state.sendEvery === 0;
+    const shouldSend = !suppressProtectedBlackSample && deviceConnected && frameIndexRef.current % state.sendEvery === 0;
     if (shouldSend) {
       try {
         const write = await deviceAdapter.writeFrame(ledFrame);
