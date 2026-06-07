@@ -6,6 +6,7 @@ const {
   createFrameCoaster,
   isFlatBlackFrame,
   isProtectedCaptureReason,
+  shouldCoastCaptureFrame,
 } = require("./dx-light-frame-coasting.cjs");
 
 describe("dx light frame coasting", () => {
@@ -71,6 +72,14 @@ describe("dx light frame coasting", () => {
   it("detects flat black frames without treating varied dark frames as blocked", () => {
     expect(isFlatBlackFrame(bytes([0, 0, 0, 1, 1, 1, 2, 2, 2]))).toBe(true);
     expect(isFlatBlackFrame(bytes([3, 2, 1, 24, 8, 5, 4, 3, 16]))).toBe(false);
+  });
+
+  it("only coasts black frames in protected active-capture context", () => {
+    const blackFrame = bytes([0, 0, 0, 1, 1, 1]);
+
+    expect(shouldCoastCaptureFrame(blackFrame, "AcquireNextFrame failed: DXGI_ERROR_ACCESS_LOST", true)).toBe(true);
+    expect(shouldCoastCaptureFrame(blackFrame, "", true)).toBe(false);
+    expect(shouldCoastCaptureFrame(blackFrame, "AcquireNextFrame failed: DXGI_ERROR_ACCESS_LOST", false)).toBe(false);
   });
 });
 

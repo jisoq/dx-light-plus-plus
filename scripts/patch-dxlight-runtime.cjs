@@ -506,6 +506,7 @@ function verifyExtractedApp(directory) {
     [worker, "parentPort.postMessage"],
     [coastingHelper, "createFrameCoaster"],
     [coastingHelper, "isProtectedCaptureReason"],
+    [coastingHelper, "shouldCoastCaptureFrame"],
     [coastingHelper, "DEFAULT_COAST_MS = 8000"],
     [preload, "dxLightSyncDashboard"],
     [html, "dx-sync-dashboard.css"],

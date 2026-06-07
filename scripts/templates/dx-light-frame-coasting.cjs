@@ -154,6 +154,12 @@ function isProtectedCaptureReason(reason) {
   return /DXGI_ERROR_ACCESS_LOST|E_ACCESSDENIED|DXGI_ERROR_INVALID_CALL|DuplicateOutput failed|AcquireNextFrame failed/i.test(String(reason || ""));
 }
 
+function shouldCoastCaptureFrame(frame, reason, displayActive = true) {
+  return displayActive !== false &&
+    isFlatBlackFrame(frame) &&
+    isProtectedCaptureReason(reason);
+}
+
 function normalizeFrame(frame, cols, rows) {
   const bytes = toUint8Array(frame);
   const expectedLength = Math.max(1, Math.round(cols)) * Math.max(1, Math.round(rows)) * 3;
@@ -219,4 +225,5 @@ module.exports = {
   createFrameCoaster,
   isFlatBlackFrame,
   isProtectedCaptureReason,
+  shouldCoastCaptureFrame,
 };

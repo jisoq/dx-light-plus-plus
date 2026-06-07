@@ -10,6 +10,7 @@ const {
   createFrameCoaster,
   isFlatBlackFrame,
   isProtectedCaptureReason,
+  shouldCoastCaptureFrame,
 } = require("./dx-light-frame-coasting.cjs");
 
 const {
@@ -307,19 +308,20 @@ function postCoastedFrame(reason, displayId, cols, rows, status = {}) {
   const frame = coaster.coastFrame(cols, rows, now);
   const coastStatus = coaster.status(now);
   const { reason: _ignoredReason, ...statusWithoutReason } = status;
+  const displayActive = status.displayActive !== false;
 
   postNativeStatus(reason, {
     ...statusWithoutReason,
-    displayActive: true,
-    captureDegraded: true,
-    coastingActive: Boolean(frame),
+    displayActive,
+    captureDegraded: displayActive,
+    coastingActive: displayActive && Boolean(frame),
     coastingAgeMs: coastStatus.ageMs,
     coastRemainingMs: coastStatus.coastRemainingMs,
     nativeCooldownMs: nativeCooldownMs(now),
   });
 
-  if (!frame) {
-    logNativeSampler(`coasting skipped no-history reason=${reason}`);
+  if (!displayActive || !frame) {
+    logNativeSampler(`coasting skipped displayActive=${displayActive} hasHistory=${Boolean(frame)} reason=${reason}`);
     return false;
   }
 
@@ -334,12 +336,27 @@ function postFrameForDisplay(displayId, frame, cols, rows, status = {}) {
   }
 
   const reason = status.reason || "";
-  if (isFlatBlackFrame(bytes)) {
-    return postCoastedFrame(reason || "protected-like flat black frame", displayId, cols, rows, status);
+  if (status.displayActive === false) {
+    nativeFlatFrameCount = 0;
+    postNativeStatus(reason, {
+      ...status,
+      displayActive: false,
+      captureDegraded: false,
+      coastingActive: false,
+      nativeCooldownMs: 0,
+    });
+    postOutputFrame(displayId, bytes);
+    return true;
+  }
+
+  if (shouldCoastCaptureFrame(bytes, reason, status.displayActive)) {
+    return postCoastedFrame(reason, displayId, cols, rows, status);
   }
 
   clearNativeCooldownState();
-  coasterFor(displayId).recordFrame(bytes, cols, rows, Date.now());
+  if (!isFlatBlackFrame(bytes)) {
+    coasterFor(displayId).recordFrame(bytes, cols, rows, Date.now());
+  }
   postNativeStatus(reason, {
     ...status,
     displayActive: true,
@@ -588,15 +605,16 @@ function startNativeBorderSampler() {
         // Process may have already exited.
       }
     }
+    if (isDisplayOffReason(reason)) {
+      postBlackFrame(reason);
+      logNativeSampler(`holding black frame until sync restarts reason=${reason}`);
+      return;
+    }
     if (isProtectedCaptureReason(reason)) {
       enterNativeCooldown(reason, child);
       return;
     }
     postBlackFrame(reason);
-    if (isDisplayOffReason(reason)) {
-      logNativeSampler(`holding black frame until sync restarts reason=${reason}`);
-      return;
-    }
     if (!sawFrame) {
       startSequentialEdgeCapture(reason);
       return;
@@ -699,12 +717,13 @@ function startNativeBorderSampler() {
       contentBoundsActive: Boolean(message.contentBoundsActive),
       contentLeft: message.contentLeft || 0,
       contentRight: message.contentRight || 0,
+      displayActive: message.displayActive !== false,
       reason,
     };
 
-    if (isFlatBlackFrame(frame)) {
+    if (shouldCoastCaptureFrame(frame, reason, status.displayActive)) {
       nativeFlatFrameCount += 1;
-      const flatReason = reason || "native sampler produced protected-like flat black frame";
+      const flatReason = reason;
       logNativeSampler(`flat native frame count=${nativeFlatFrameCount} reason=${flatReason}`);
       if (nativeFlatFrameCount >= 2) {
         restartScheduled = true;
