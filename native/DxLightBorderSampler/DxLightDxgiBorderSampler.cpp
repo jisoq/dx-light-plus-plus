@@ -2,12 +2,15 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <powersetting.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -17,6 +20,10 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#ifndef DEVICE_NOTIFY_CALLBACK
+#define DEVICE_NOTIFY_CALLBACK 0x00000002
+#endif
 
 template <typename T>
 static void releaseCom(T*& value)
@@ -355,6 +362,121 @@ static OutputSelection selectOutput(const Options& options)
     return selected;
 }
 
+class MonitorPowerObserver
+{
+public:
+    MonitorPowerObserver()
+    {
+        params_.Callback = &MonitorPowerObserver::notifyCallback;
+        params_.Context = this;
+        if (!registerFor(kGuidSessionDisplayStatus, "session display status"))
+        {
+            registerFor(kGuidConsoleDisplayState, "console display state");
+        }
+    }
+
+    ~MonitorPowerObserver()
+    {
+        if (registration_)
+        {
+            PowerSettingUnregisterNotification(registration_);
+            registration_ = nullptr;
+        }
+    }
+
+    MonitorPowerObserver(const MonitorPowerObserver&) = delete;
+    MonitorPowerObserver& operator=(const MonitorPowerObserver&) = delete;
+
+    bool displayActive() const
+    {
+        return displayState_.load(std::memory_order_relaxed) != PowerMonitorOff;
+    }
+
+    std::string inactiveReason() const
+    {
+        return "session display power state is off";
+    }
+
+private:
+    using PowerSettingCallback = ULONG(CALLBACK*)(PVOID, ULONG, PVOID);
+
+    struct PowerSettingSubscribeParameters
+    {
+        PowerSettingCallback Callback = nullptr;
+        PVOID Context = nullptr;
+    };
+
+    static constexpr DWORD PowerMonitorOff = 0;
+    static constexpr DWORD PowerMonitorOn = 1;
+    static constexpr DWORD PowerMonitorDim = 2;
+    static const GUID kGuidSessionDisplayStatus;
+    static const GUID kGuidConsoleDisplayState;
+
+    PowerSettingSubscribeParameters params_{};
+    HPOWERNOTIFY registration_ = nullptr;
+    std::atomic<DWORD> displayState_{PowerMonitorOn};
+
+    bool registerFor(const GUID& guid, const char* label)
+    {
+        HPOWERNOTIFY handle = nullptr;
+        const DWORD result = PowerSettingRegisterNotification(
+            &guid,
+            DEVICE_NOTIFY_CALLBACK,
+            reinterpret_cast<HANDLE>(&params_),
+            &handle);
+        if (result != ERROR_SUCCESS)
+        {
+            std::cerr << "Power notification registration failed for " << label
+                      << ": " << result << std::endl;
+            return false;
+        }
+
+        registration_ = handle;
+        std::cerr << "Power notification registered for " << label << std::endl;
+        return true;
+    }
+
+    void updateFromPowerSetting(const POWERBROADCAST_SETTING& setting)
+    {
+        if (!guidEquals(setting.PowerSetting, kGuidSessionDisplayStatus) &&
+            !guidEquals(setting.PowerSetting, kGuidConsoleDisplayState))
+        {
+            return;
+        }
+        if (setting.DataLength < sizeof(DWORD))
+        {
+            return;
+        }
+
+        DWORD state = PowerMonitorOn;
+        std::memcpy(&state, setting.Data, sizeof(state));
+        if (state == PowerMonitorOff || state == PowerMonitorOn || state == PowerMonitorDim)
+        {
+            displayState_.store(state, std::memory_order_relaxed);
+        }
+    }
+
+    static bool guidEquals(const GUID& left, const GUID& right)
+    {
+        return std::memcmp(&left, &right, sizeof(GUID)) == 0;
+    }
+
+    static ULONG CALLBACK notifyCallback(PVOID context, ULONG type, PVOID setting)
+    {
+        if (context && type == PBT_POWERSETTINGCHANGE && setting)
+        {
+            static_cast<MonitorPowerObserver*>(context)->updateFromPowerSetting(
+                *static_cast<POWERBROADCAST_SETTING*>(setting));
+        }
+        return ERROR_SUCCESS;
+    }
+};
+
+const GUID MonitorPowerObserver::kGuidSessionDisplayStatus =
+    {0x2b84c20e, 0xad23, 0x4ddf, {0x93, 0xdb, 0x05, 0xff, 0xbd, 0x7e, 0xfc, 0xa5}};
+const GUID MonitorPowerObserver::kGuidConsoleDisplayState =
+    {0x6fe69556, 0x704a, 0x47a0, {0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47}};
+
 class DxgiSampler
 {
 public:
@@ -499,6 +621,7 @@ private:
     };
 
     Options options_;
+    MonitorPowerObserver monitorPower_;
     OutputSelection selection_;
     ID3D11Device* device_ = nullptr;
     ID3D11DeviceContext* context_ = nullptr;
@@ -593,6 +716,11 @@ private:
 
     bool selectedOutputReadyForFrame(std::string& reason)
     {
+        if (!monitorPower_.displayActive())
+        {
+            reason = monitorPower_.inactiveReason();
+            return false;
+        }
         return isSelectedOutputAvailable(reason);
     }
 

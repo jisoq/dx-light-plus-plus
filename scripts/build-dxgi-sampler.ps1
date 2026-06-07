@@ -79,6 +79,7 @@ $optimize = if ($Configuration -ieq "Debug") { "-O0" } else { "-O2" }
     -ld3d11 `
     -ldxgi `
     -ldxva2 `
+    -lpowrprof `
     -luser32 `
     -lole32
 

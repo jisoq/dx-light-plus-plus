@@ -8,6 +8,7 @@ const {
 } = require("@warren-robobloq/quiklight");
 const {
   createFrameCoaster,
+  isDuplicationSessionLossReason,
   isFlatBlackFrame,
   isProtectedCaptureReason,
   shouldCoastCaptureFrame,
@@ -315,6 +316,8 @@ function postCoastedFrame(reason, displayId, cols, rows, status = {}) {
     displayActive,
     captureDegraded: displayActive,
     coastingActive: displayActive && Boolean(frame),
+    noCoastingHistory: displayActive && !frame,
+    outputSuppressed: displayActive && !frame,
     coastingAgeMs: coastStatus.ageMs,
     coastRemainingMs: coastStatus.coastRemainingMs,
     nativeCooldownMs: nativeCooldownMs(now),
@@ -434,12 +437,16 @@ function enterNativeCooldown(reason, child) {
 
   const grid = gridForDisplay(display);
   logNativeSampler(`native cooldown ${NATIVE_RECOVERY_COOLDOWN_MS}ms reason=${reason}`);
-  postCoastedFrame(reason, display.displayId, grid.cols, grid.rows, {
+  const postedCoastingFrame = postCoastedFrame(reason, display.displayId, grid.cols, grid.rows, {
     mode: "native-border",
     backend: "dxgi-desktop-duplication",
     nativeRecoveryCooldownMs: NATIVE_RECOVERY_COOLDOWN_MS,
   });
-  scheduleCoasting(reason, display.displayId, grid.cols, grid.rows);
+  if (postedCoastingFrame) {
+    scheduleCoasting(reason, display.displayId, grid.cols, grid.rows);
+  } else {
+    logNativeSampler(`native cooldown has no coasting history; suppressing output reason=${reason}`);
+  }
   scheduleNativeCooldownProbe(NATIVE_RECOVERY_COOLDOWN_MS);
 }
 
@@ -608,6 +615,11 @@ function startNativeBorderSampler() {
     if (isDisplayOffReason(reason)) {
       postBlackFrame(reason);
       logNativeSampler(`holding black frame until sync restarts reason=${reason}`);
+      return;
+    }
+    if (isDuplicationSessionLossReason(reason)) {
+      logNativeSampler(`recreating native sampler after duplication session loss reason=${reason}`);
+      scheduleNativeSamplerRestart(reason, nativeStartedAt);
       return;
     }
     if (isProtectedCaptureReason(reason)) {

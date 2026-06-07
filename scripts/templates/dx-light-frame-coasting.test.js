@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 const require = createRequire(import.meta.url);
 const {
   createFrameCoaster,
+  isDuplicationSessionLossReason,
   isFlatBlackFrame,
   isProtectedCaptureReason,
   shouldCoastCaptureFrame,
@@ -62,9 +63,14 @@ describe("dx light frame coasting", () => {
     expect(coaster.coastFrame(3, 1, 200)).toBeNull();
   });
 
-  it("classifies protected and unstable native capture reasons", () => {
-    expect(isProtectedCaptureReason("AcquireNextFrame failed: DXGI_ERROR_INVALID_CALL")).toBe(true);
+  it("separates protected capture denial from normal DXGI session loss", () => {
     expect(isProtectedCaptureReason("DuplicateOutput failed: E_ACCESSDENIED")).toBe(true);
+    expect(isProtectedCaptureReason("AcquireNextFrame failed: DXGI_ERROR_ACCESS_LOST")).toBe(false);
+    expect(isProtectedCaptureReason("AcquireNextFrame failed: DXGI_ERROR_INVALID_CALL")).toBe(false);
+    expect(isDuplicationSessionLossReason("AcquireNextFrame failed: DXGI_ERROR_ACCESS_LOST")).toBe(true);
+    expect(isDuplicationSessionLossReason("AcquireNextFrame failed: DXGI_ERROR_DEVICE_REMOVED")).toBe(true);
+    expect(isDuplicationSessionLossReason("AcquireNextFrame failed: DXGI_ERROR_DEVICE_RESET")).toBe(true);
+    expect(isDuplicationSessionLossReason("DuplicateOutput failed: E_ACCESSDENIED")).toBe(false);
     expect(isProtectedCaptureReason("native sampler not found candidates=a|b")).toBe(false);
     expect(isProtectedCaptureReason("native sampler disabled by DX_LIGHT_NATIVE_BORDER=0")).toBe(false);
   });
@@ -77,9 +83,10 @@ describe("dx light frame coasting", () => {
   it("only coasts black frames in protected active-capture context", () => {
     const blackFrame = bytes([0, 0, 0, 1, 1, 1]);
 
-    expect(shouldCoastCaptureFrame(blackFrame, "AcquireNextFrame failed: DXGI_ERROR_ACCESS_LOST", true)).toBe(true);
+    expect(shouldCoastCaptureFrame(blackFrame, "DuplicateOutput failed: E_ACCESSDENIED", true)).toBe(true);
+    expect(shouldCoastCaptureFrame(blackFrame, "AcquireNextFrame failed: DXGI_ERROR_ACCESS_LOST", true)).toBe(false);
     expect(shouldCoastCaptureFrame(blackFrame, "", true)).toBe(false);
-    expect(shouldCoastCaptureFrame(blackFrame, "AcquireNextFrame failed: DXGI_ERROR_ACCESS_LOST", false)).toBe(false);
+    expect(shouldCoastCaptureFrame(blackFrame, "DuplicateOutput failed: E_ACCESSDENIED", false)).toBe(false);
   });
 });
 
