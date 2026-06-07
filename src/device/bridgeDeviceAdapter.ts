@@ -1,4 +1,4 @@
-import type { DeviceWriteResult, LedFrame, LightDeviceAdapter, LightDeviceInfo, MediaContext } from '../domain/types';
+import type { DeviceWriteResult, LedFrame, LightDeviceAdapter, LightDeviceInfo } from '../domain/types';
 import type { AppSettings } from '../settings/appSettings';
 
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:8787';
@@ -107,10 +107,6 @@ export class BridgeLightDeviceAdapter implements LightDeviceAdapter {
 
   async openBrowser(): Promise<void> {
     await this.request('/open-browser', { method: 'POST' });
-  }
-
-  async getMediaContext(): Promise<MediaContext> {
-    return this.request<MediaContext>('/media-context');
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {

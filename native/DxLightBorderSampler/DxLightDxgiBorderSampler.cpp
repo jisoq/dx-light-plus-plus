@@ -2,8 +2,6 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
-#include <lowlevelmonitorconfigurationapi.h>
-#include <physicalmonitorenumerationapi.h>
 
 #include <algorithm>
 #include <chrono>
@@ -172,15 +170,12 @@ static bool isDuplicationSessionLoss(HRESULT hr)
 
 static bool shouldRetryDuplicateOutput(HRESULT hr)
 {
-    return hr != DXGI_ERROR_UNSUPPORTED && hr != E_INVALIDARG;
+    return hr != DXGI_ERROR_UNSUPPORTED &&
+        hr != E_INVALIDARG &&
+        hr != E_ACCESSDENIED &&
+        hr != DXGI_ERROR_ACCESS_LOST &&
+        hr != DXGI_ERROR_INVALID_CALL;
 }
-
-enum class MonitorPowerProbeResult
-{
-    Unknown,
-    On,
-    LowPower
-};
 
 static std::string base64Encode(const std::vector<uint8_t>& bytes)
 {
@@ -303,77 +298,6 @@ static bool displayConfigTargetIsAvailable(const WCHAR* gdiDeviceName, std::stri
     return true;
 }
 
-static std::string hexMonitorPowerMode(DWORD value)
-{
-    std::ostringstream output;
-    output << "0x"
-           << std::uppercase << std::hex << std::setw(2) << std::setfill('0')
-           << value;
-    return output.str();
-}
-
-static bool isKnownLowPowerMonitorMode(DWORD value)
-{
-    return value >= 0x02 && value <= 0x05;
-}
-
-static MonitorPowerProbeResult queryPhysicalMonitorPower(HMONITOR monitor, DWORD& powerMode)
-{
-    if (!monitor)
-    {
-        return MonitorPowerProbeResult::Unknown;
-    }
-
-    DWORD physicalMonitorCount = 0;
-    if (!GetNumberOfPhysicalMonitorsFromHMONITOR(monitor, &physicalMonitorCount) ||
-        physicalMonitorCount == 0)
-    {
-        return MonitorPowerProbeResult::Unknown;
-    }
-
-    std::vector<PHYSICAL_MONITOR> physicalMonitors(physicalMonitorCount);
-    if (!GetPhysicalMonitorsFromHMONITOR(monitor, physicalMonitorCount, physicalMonitors.data()))
-    {
-        return MonitorPowerProbeResult::Unknown;
-    }
-
-    MonitorPowerProbeResult result = MonitorPowerProbeResult::Unknown;
-    DWORD lowPowerMode = 0;
-    for (const PHYSICAL_MONITOR& physicalMonitor : physicalMonitors)
-    {
-        DWORD currentValue = 0;
-        DWORD maximumValue = 0;
-        MC_VCP_CODE_TYPE codeType{};
-        if (!GetVCPFeatureAndVCPFeatureReply(
-            physicalMonitor.hPhysicalMonitor,
-            0xD6,
-            &codeType,
-            &currentValue,
-            &maximumValue))
-        {
-            continue;
-        }
-
-        if (currentValue == 0x01)
-        {
-            result = MonitorPowerProbeResult::On;
-            break;
-        }
-        if (isKnownLowPowerMonitorMode(currentValue))
-        {
-            result = MonitorPowerProbeResult::LowPower;
-            lowPowerMode = currentValue;
-        }
-    }
-
-    DestroyPhysicalMonitors(physicalMonitorCount, physicalMonitors.data());
-    if (result == MonitorPowerProbeResult::LowPower)
-    {
-        powerMode = lowPowerMode;
-    }
-    return result;
-}
-
 static OutputSelection selectOutput(const Options& options)
 {
     IDXGIFactory1* factory = nullptr;
@@ -490,12 +414,7 @@ public:
             }
             if (isDuplicationSessionLoss(hr))
             {
-                const std::string reason = "duplication session lost: " + describeHresult(hr);
-                std::cerr << "Recovering DXGI duplication after AcquireNextFrame failed: "
-                          << describeHresult(hr) << std::endl;
-                blankFrame(reason);
-                resetDeviceResources();
-                return rgb_;
+                throw std::runtime_error("AcquireNextFrame failed: " + describeHresult(hr));
             }
             throw std::runtime_error("AcquireNextFrame failed: " + describeHresult(hr));
         }
@@ -602,9 +521,6 @@ private:
     bool hasPreviousRgb_ = false;
     bool displayActive_ = true;
     std::string displayStatusReason_;
-    bool monitorPowerProbeEverSucceeded_ = false;
-    int monitorPowerProbeFailureCount_ = 0;
-    std::chrono::steady_clock::time_point nextMonitorPowerProbeAt_{};
     int contentBoundsHoldFrames_ = 0;
     ContentBounds lastContentBounds_;
 
@@ -672,49 +588,11 @@ private:
             return false;
         }
 
-        DWORD powerMode = 0;
-        const MonitorPowerProbeResult powerProbe = queryPhysicalMonitorPower(desc.Monitor, powerMode);
-        if (powerProbe == MonitorPowerProbeResult::On)
-        {
-            monitorPowerProbeEverSucceeded_ = true;
-            monitorPowerProbeFailureCount_ = 0;
-            return true;
-        }
-        if (powerProbe == MonitorPowerProbeResult::LowPower)
-        {
-            monitorPowerProbeEverSucceeded_ = true;
-            monitorPowerProbeFailureCount_ = 0;
-            reason = "physical monitor power mode is low-power (" + hexMonitorPowerMode(powerMode) + ")";
-            return false;
-        }
-
-        if (monitorPowerProbeEverSucceeded_)
-        {
-            monitorPowerProbeFailureCount_ += 1;
-            if (monitorPowerProbeFailureCount_ >= 2)
-            {
-                reason = "physical monitor power state is unreachable after previously responding";
-                return false;
-            }
-        }
-
         return true;
     }
 
     bool selectedOutputReadyForFrame(std::string& reason)
     {
-        const auto now = std::chrono::steady_clock::now();
-        if (now < nextMonitorPowerProbeAt_)
-        {
-            if (!displayActive_)
-            {
-                reason = displayStatusReason_.empty() ? "selected output is inactive" : displayStatusReason_;
-                return false;
-            }
-            return true;
-        }
-
-        nextMonitorPowerProbeAt_ = now + std::chrono::milliseconds(1000);
         return isSelectedOutputAvailable(reason);
     }
 
@@ -728,13 +606,6 @@ private:
         contentBoundsHoldFrames_ = 0;
         lastContentBounds_ = ContentBounds{};
         return rgb_;
-    }
-
-    void resetDeviceResources()
-    {
-        releaseDeviceResources();
-        refreshOutputSelection();
-        initializeDevice();
     }
 
     void initializeDevice()
@@ -769,7 +640,7 @@ private:
         }
 
         HRESULT duplicateHr = S_OK;
-        const int maxAttempts = 20;
+        const int maxAttempts = 2;
         for (int attempt = 1; attempt <= maxAttempts; ++attempt)
         {
             HRESULT hr = selection_.output->QueryInterface(__uuidof(IDXGIOutput1), reinterpret_cast<void**>(&output1_));

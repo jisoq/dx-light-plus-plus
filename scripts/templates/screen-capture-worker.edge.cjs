@@ -6,6 +6,11 @@ const {
   startCaptureMultiScreens,
   stopCaptureMultiScreens,
 } = require("@warren-robobloq/quiklight");
+const {
+  createFrameCoaster,
+  isFlatBlackFrame,
+  isProtectedCaptureReason,
+} = require("./dx-light-frame-coasting.cjs");
 
 const {
   displays = [],
@@ -20,8 +25,16 @@ let timer = null;
 let regionIndex = 0;
 let nativeProcess = null;
 let nativeRestartTimer = null;
+let nativeCooldownTimer = null;
+let coastingTimer = null;
 let nativeRestartAttempts = 0;
 let sequentialStarted = false;
+let nativeCooldownUntil = 0;
+let nativeFlatFrameCount = 0;
+
+const NATIVE_RECOVERY_COOLDOWN_MS = Math.max(1000, Number(process.env.DX_LIGHT_NATIVE_RECOVERY_COOLDOWN_MS || 30000));
+const COAST_TICK_MS = Math.max(33, Math.round(finalSyncSpeed || 80));
+const coasters = new Map();
 
 function logNativeSampler(message) {
   try {
@@ -49,11 +62,28 @@ const stopNative = () => {
   }
 };
 
-const stopNativeSampler = () => {
+const clearNativeRestartTimer = () => {
   if (nativeRestartTimer) {
     clearTimeout(nativeRestartTimer);
     nativeRestartTimer = null;
   }
+};
+
+const clearNativeCooldownTimer = () => {
+  if (nativeCooldownTimer) {
+    clearTimeout(nativeCooldownTimer);
+    nativeCooldownTimer = null;
+  }
+};
+
+const clearCoastingTimer = () => {
+  if (coastingTimer) {
+    clearTimeout(coastingTimer);
+    coastingTimer = null;
+  }
+};
+
+const killNativeProcess = () => {
   if (nativeProcess) {
     try {
       nativeProcess.kill();
@@ -62,6 +92,13 @@ const stopNativeSampler = () => {
     }
     nativeProcess = null;
   }
+};
+
+const stopNativeSampler = () => {
+  clearNativeRestartTimer();
+  clearNativeCooldownTimer();
+  clearCoastingTimer();
+  killNativeProcess();
 };
 
 const toBytes = (value) => {
@@ -181,9 +218,11 @@ function applyRegion(region, frameMap) {
 
   state.seen.add(region.name);
   if (state.seen.size >= state.required) {
-    const output = {};
-    output[state.display.displayId] = state.buffer.slice(0);
-    parentPort.postMessage(output);
+    postFrameForDisplay(state.display.displayId, state.buffer.slice(0), state.cols, state.rows, {
+      mode: "sequential-edge",
+      backend: "quiklight-region-fallback",
+      reason: "",
+    });
   }
 }
 
@@ -216,8 +255,179 @@ function postNativeStatus(reason, extra = {}) {
   });
 }
 
+function displayKey(displayId) {
+  const display = displays[0];
+  return displayId || (display && display.displayId) || "DISPLAY1";
+}
+
+function gridForDisplay(display, cols, rows) {
+  return {
+    cols: Math.max(1, Math.round(cols || Math.ceil((display && display.width || 1) / samplingRate))),
+    rows: Math.max(1, Math.round(rows || Math.ceil((display && display.height || 1) / samplingRate))),
+  };
+}
+
+function normalizeFrameBytes(frame, cols, rows) {
+  const bytes = toBytes(frame);
+  const expectedLength = Math.max(1, cols * rows * 3);
+  if (!bytes || bytes.length < expectedLength) {
+    return null;
+  }
+  return bytes.length === expectedLength ? bytes : bytes.slice(0, expectedLength);
+}
+
+function nativeCooldownMs(now = Date.now()) {
+  return Math.max(0, nativeCooldownUntil - now);
+}
+
+function coasterFor(displayId) {
+  const key = displayKey(displayId);
+  if (!coasters.has(key)) {
+    coasters.set(key, createFrameCoaster());
+  }
+  return coasters.get(key);
+}
+
+function postOutputFrame(displayId, frame) {
+  const output = {};
+  output[displayKey(displayId)] = frame;
+  parentPort.postMessage(output);
+}
+
+function clearNativeCooldownState() {
+  nativeCooldownUntil = 0;
+  nativeFlatFrameCount = 0;
+  clearNativeCooldownTimer();
+  clearCoastingTimer();
+}
+
+function postCoastedFrame(reason, displayId, cols, rows, status = {}) {
+  const now = Date.now();
+  const coaster = coasterFor(displayId);
+  const frame = coaster.coastFrame(cols, rows, now);
+  const coastStatus = coaster.status(now);
+  const { reason: _ignoredReason, ...statusWithoutReason } = status;
+
+  postNativeStatus(reason, {
+    ...statusWithoutReason,
+    displayActive: true,
+    captureDegraded: true,
+    coastingActive: Boolean(frame),
+    coastingAgeMs: coastStatus.ageMs,
+    coastRemainingMs: coastStatus.coastRemainingMs,
+    nativeCooldownMs: nativeCooldownMs(now),
+  });
+
+  if (!frame) {
+    logNativeSampler(`coasting skipped no-history reason=${reason}`);
+    return false;
+  }
+
+  postOutputFrame(displayId, frame);
+  return true;
+}
+
+function postFrameForDisplay(displayId, frame, cols, rows, status = {}) {
+  const bytes = normalizeFrameBytes(frame, cols, rows);
+  if (!bytes) {
+    return false;
+  }
+
+  const reason = status.reason || "";
+  if (isFlatBlackFrame(bytes)) {
+    return postCoastedFrame(reason || "protected-like flat black frame", displayId, cols, rows, status);
+  }
+
+  clearNativeCooldownState();
+  coasterFor(displayId).recordFrame(bytes, cols, rows, Date.now());
+  postNativeStatus(reason, {
+    ...status,
+    displayActive: true,
+    captureDegraded: false,
+    coastingActive: false,
+    nativeCooldownMs: 0,
+  });
+  postOutputFrame(displayId, bytes);
+  return true;
+}
+
+function scheduleCoasting(reason, displayId, cols, rows) {
+  if (exiting || coastingTimer) {
+    return;
+  }
+
+  const tick = () => {
+    coastingTimer = null;
+    if (exiting || nativeCooldownMs() <= 0) {
+      return;
+    }
+
+    postCoastedFrame(reason, displayId, cols, rows, {
+      mode: "native-border",
+      backend: "dxgi-desktop-duplication",
+    });
+    scheduleCoasting(reason, displayId, cols, rows);
+  };
+
+  coastingTimer = setTimeout(tick, COAST_TICK_MS);
+}
+
+function scheduleNativeCooldownProbe(delay) {
+  clearNativeCooldownTimer();
+  nativeCooldownTimer = setTimeout(() => {
+    nativeCooldownTimer = null;
+    if (exiting) {
+      return;
+    }
+    nativeCooldownUntil = 0;
+    logNativeSampler("native cooldown elapsed; probing native sampler once");
+    startNativeBorderSampler();
+  }, Math.max(0, delay));
+}
+
+function enterNativeCooldown(reason, child) {
+  const display = displays[0];
+  if (!display) {
+    postNativeStatus(reason, {
+      displayActive: true,
+      captureDegraded: true,
+      coastingActive: false,
+      nativeCooldownMs: NATIVE_RECOVERY_COOLDOWN_MS,
+    });
+    return;
+  }
+
+  clearNativeRestartTimer();
+  nativeCooldownUntil = Date.now() + NATIVE_RECOVERY_COOLDOWN_MS;
+  nativeRestartAttempts = 0;
+  nativeFlatFrameCount = 0;
+
+  if (nativeProcess === child) {
+    nativeProcess = null;
+  }
+  if (child) {
+    try {
+      child.kill();
+    } catch {
+      // Process may have already exited.
+    }
+  } else {
+    killNativeProcess();
+  }
+
+  const grid = gridForDisplay(display);
+  logNativeSampler(`native cooldown ${NATIVE_RECOVERY_COOLDOWN_MS}ms reason=${reason}`);
+  postCoastedFrame(reason, display.displayId, grid.cols, grid.rows, {
+    mode: "native-border",
+    backend: "dxgi-desktop-duplication",
+    nativeRecoveryCooldownMs: NATIVE_RECOVERY_COOLDOWN_MS,
+  });
+  scheduleCoasting(reason, display.displayId, grid.cols, grid.rows);
+  scheduleNativeCooldownProbe(NATIVE_RECOVERY_COOLDOWN_MS);
+}
+
 function isDisplayOffReason(reason) {
-  return /display target|display path|display source|physical monitor|selected output/i.test(String(reason || ""));
+  return /display target|display path|display source|selected output/i.test(String(reason || ""));
 }
 
 function postBlackFrame(reason, extra = {}) {
@@ -225,6 +435,9 @@ function postBlackFrame(reason, extra = {}) {
   if (!display) {
     postNativeStatus(reason, {
       displayActive: false,
+      captureDegraded: false,
+      coastingActive: false,
+      nativeCooldownMs: nativeCooldownMs(),
       ...extra,
     });
     return;
@@ -237,6 +450,9 @@ function postBlackFrame(reason, extra = {}) {
 
   postNativeStatus(reason, {
     displayActive: false,
+    captureDegraded: false,
+    coastingActive: false,
+    nativeCooldownMs: nativeCooldownMs(),
     ...extra,
   });
   parentPort.postMessage(output);
@@ -255,6 +471,9 @@ function startSequentialEdgeCapture(reason) {
     backend: "quiklight-region-fallback",
     reason: reason || "",
     displayActive: true,
+    captureDegraded: false,
+    coastingActive: false,
+    nativeCooldownMs: nativeCooldownMs(),
   });
   buildRegions();
   schedule(0);
@@ -275,6 +494,10 @@ function scheduleNativeSamplerRestart(reason, nativeStartedAt) {
   postNativeStatus(`restarting native sampler: ${reason}`, {
     nativeRestartAttempt: nativeRestartAttempts,
     nativeRetryDelayMs: delay,
+    displayActive: true,
+    captureDegraded: true,
+    coastingActive: false,
+    nativeCooldownMs: nativeCooldownMs(),
   });
 
   nativeRestartTimer = setTimeout(() => {
@@ -288,6 +511,12 @@ function scheduleNativeSamplerRestart(reason, nativeStartedAt) {
 
 function startNativeBorderSampler() {
   if (nativeProcess) {
+    return true;
+  }
+
+  const cooldownMs = nativeCooldownMs();
+  if (cooldownMs > 0) {
+    scheduleNativeCooldownProbe(cooldownMs);
     return true;
   }
 
@@ -358,6 +587,10 @@ function startNativeBorderSampler() {
       } catch {
         // Process may have already exited.
       }
+    }
+    if (isProtectedCaptureReason(reason)) {
+      enterNativeCooldown(reason, child);
+      return;
     }
     postBlackFrame(reason);
     if (isDisplayOffReason(reason)) {
@@ -431,6 +664,10 @@ function startNativeBorderSampler() {
         averageRadiusPx: message.averageRadiusPx || averageRadiusPx,
         smoothingAlphaPercent: message.smoothingAlphaPercent || smoothingAlphaPercent,
         deadband: message.deadband || deadband,
+        displayActive: true,
+        captureDegraded: false,
+        coastingActive: false,
+        nativeCooldownMs: nativeCooldownMs(),
       });
       return;
     }
@@ -445,8 +682,11 @@ function startNativeBorderSampler() {
       startNativeBorderSampler.loggedFirstFrame = true;
       logNativeSampler(`first-frame backend=${message.backend || ""} elapsedMs=${message.elapsedMs || 0}`);
     }
-    parentPort.postMessage({
-      type: "native-border-status",
+    const cols = Math.max(1, Math.round(message.cols || Math.ceil(display.width / samplingRate)));
+    const rows = Math.max(1, Math.round(message.rows || Math.ceil(display.height / samplingRate)));
+    const frame = new Uint8Array(Buffer.from(message.colors, "base64"));
+    const reason = message.displayStatusReason || "";
+    const status = {
       mode: "native-border",
       backend: message.backend || "dxgi-desktop-duplication",
       elapsedMs: message.elapsedMs || 0,
@@ -459,13 +699,25 @@ function startNativeBorderSampler() {
       contentBoundsActive: Boolean(message.contentBoundsActive),
       contentLeft: message.contentLeft || 0,
       contentRight: message.contentRight || 0,
-      displayActive: message.displayActive !== false,
-      reason: message.displayStatusReason || "",
-    });
+      reason,
+    };
 
-    const output = {};
-    output[message.displayId || display.displayId] = new Uint8Array(Buffer.from(message.colors, "base64"));
-    parentPort.postMessage(output);
+    if (isFlatBlackFrame(frame)) {
+      nativeFlatFrameCount += 1;
+      const flatReason = reason || "native sampler produced protected-like flat black frame";
+      logNativeSampler(`flat native frame count=${nativeFlatFrameCount} reason=${flatReason}`);
+      if (nativeFlatFrameCount >= 2) {
+        restartScheduled = true;
+        clearTimeout(readyTimer);
+        enterNativeCooldown(flatReason, child);
+        return;
+      }
+      postCoastedFrame(flatReason, message.displayId || display.displayId, cols, rows, status);
+      return;
+    }
+
+    nativeFlatFrameCount = 0;
+    postFrameForDisplay(message.displayId || display.displayId, frame, cols, rows, status);
   }
 
   return true;
@@ -514,7 +766,15 @@ try {
     startNativeBorderSampler();
   } else {
     startCaptureMultiScreens((frameMap) => {
-      parentPort.postMessage(frameMap);
+      for (const display of displays) {
+        const grid = gridForDisplay(display);
+        const frame = frameMap && frameMap[display.displayId];
+        postFrameForDisplay(display.displayId, frame, grid.cols, grid.rows, {
+          mode: "full-frame",
+          backend: "quiklight-full-frame",
+          reason: "",
+        });
+      }
     }, displays, finalSyncSpeed, samplingRate);
   }
 } catch (error) {

@@ -102,15 +102,3 @@ export interface LightDeviceAdapter {
   disconnect(): Promise<void>;
   writeFrame(frame: LedFrame): Promise<DeviceWriteResult>;
 }
-
-export interface MediaContextMatch {
-  processName: string;
-  title: string;
-}
-
-export interface MediaContext {
-  protectedLikely: boolean;
-  mediaApp: 'netflix' | null;
-  source: string;
-  matches: MediaContextMatch[];
-}
