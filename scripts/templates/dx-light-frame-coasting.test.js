@@ -65,8 +65,11 @@ describe("dx light frame coasting", () => {
 
   it("separates protected capture denial from normal DXGI session loss", () => {
     expect(isProtectedCaptureReason("DuplicateOutput failed: E_ACCESSDENIED")).toBe(true);
+    expect(isProtectedCaptureReason("DuplicateOutput failed: DXGI_ERROR_INVALID_CALL")).toBe(true);
+    expect(isProtectedCaptureReason("DuplicateOutput failed: DXGI_ERROR_NOT_CURRENTLY_AVAILABLE")).toBe(true);
+    expect(isProtectedCaptureReason("AcquireNextFrame failed: DXGI_ERROR_INVALID_CALL")).toBe(true);
     expect(isProtectedCaptureReason("AcquireNextFrame failed: DXGI_ERROR_ACCESS_LOST")).toBe(false);
-    expect(isProtectedCaptureReason("AcquireNextFrame failed: DXGI_ERROR_INVALID_CALL")).toBe(false);
+    expect(isProtectedCaptureReason("DuplicateOutput failed: DXGI_ERROR_ACCESS_LOST")).toBe(false);
     expect(isDuplicationSessionLossReason("AcquireNextFrame failed: DXGI_ERROR_ACCESS_LOST")).toBe(true);
     expect(isDuplicationSessionLossReason("AcquireNextFrame failed: DXGI_ERROR_DEVICE_REMOVED")).toBe(true);
     expect(isDuplicationSessionLossReason("AcquireNextFrame failed: DXGI_ERROR_DEVICE_RESET")).toBe(true);
@@ -84,6 +87,7 @@ describe("dx light frame coasting", () => {
     const blackFrame = bytes([0, 0, 0, 1, 1, 1]);
 
     expect(shouldCoastCaptureFrame(blackFrame, "DuplicateOutput failed: E_ACCESSDENIED", true)).toBe(true);
+    expect(shouldCoastCaptureFrame(blackFrame, "DuplicateOutput failed: DXGI_ERROR_INVALID_CALL", true)).toBe(true);
     expect(shouldCoastCaptureFrame(blackFrame, "AcquireNextFrame failed: DXGI_ERROR_ACCESS_LOST", true)).toBe(false);
     expect(shouldCoastCaptureFrame(blackFrame, "", true)).toBe(false);
     expect(shouldCoastCaptureFrame(blackFrame, "DuplicateOutput failed: E_ACCESSDENIED", false)).toBe(false);

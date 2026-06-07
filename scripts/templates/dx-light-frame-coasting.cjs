@@ -151,7 +151,11 @@ function isFlatBlackFrame(frame) {
 }
 
 function isProtectedCaptureReason(reason) {
-  return /E_ACCESSDENIED|access denied/i.test(String(reason || ""));
+  const value = String(reason || "");
+  if (isDuplicationSessionLossReason(value)) {
+    return false;
+  }
+  return /E_ACCESSDENIED|access denied|DuplicateOutput failed|AcquireNextFrame failed/i.test(value);
 }
 
 function isDuplicationSessionLossReason(reason) {
