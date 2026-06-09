@@ -715,7 +715,8 @@ function startNativeBorderSampler() {
     const cols = Math.max(1, Math.round(message.cols || Math.ceil(display.width / samplingRate)));
     const rows = Math.max(1, Math.round(message.rows || Math.ceil(display.height / samplingRate)));
     const frame = new Uint8Array(Buffer.from(message.colors, "base64"));
-    const reason = message.displayStatusReason || "";
+    const reason = message.displayStatusReason ||
+      (message.protectedContentMaskedOut ? "DXGI protected content masked out" : "");
     const status = {
       mode: "native-border",
       backend: message.backend || "dxgi-desktop-duplication",
@@ -729,6 +730,7 @@ function startNativeBorderSampler() {
       contentBoundsActive: Boolean(message.contentBoundsActive),
       contentLeft: message.contentLeft || 0,
       contentRight: message.contentRight || 0,
+      protectedContentMaskedOut: Boolean(message.protectedContentMaskedOut),
       displayActive: message.displayActive !== false,
       reason,
     };

@@ -510,6 +510,7 @@ public:
     int deadband() const { return options_.deadband; }
     bool displayActive() const { return displayActive_; }
     const std::string& displayStatusReason() const { return displayStatusReason_; }
+    bool protectedContentMaskedOut() const { return protectedContentMaskedOut_; }
     bool contentBoundsActive() const { return lastContentBounds_.active; }
     int contentBoundsLeft() const { return lastContentBounds_.left; }
     int contentBoundsRight() const { return lastContentBounds_.right; }
@@ -531,7 +532,7 @@ public:
                     return blankFrame(reason);
                 }
                 displayActive_ = true;
-                displayStatusReason_.clear();
+                displayStatusReason_ = protectedContentMaskedOut_ ? "DXGI protected content masked out" : "";
                 return rgb_;
             }
             if (isDuplicationSessionLoss(hr))
@@ -563,6 +564,7 @@ public:
         D3D11_TEXTURE2D_DESC frameDesc{};
         frame->GetDesc(&frameDesc);
         format_ = frameDesc.Format;
+        protectedContentMaskedOut_ = frameInfo.ProtectedContentMaskedOut != FALSE;
         ensureSupportedFormat();
 
         try
@@ -587,7 +589,7 @@ public:
             }
             smoothFrame();
             displayActive_ = true;
-            displayStatusReason_.clear();
+            displayStatusReason_ = protectedContentMaskedOut_ ? "DXGI protected content masked out" : "";
         }
         catch (...)
         {
@@ -643,6 +645,7 @@ private:
     std::vector<uint8_t> previousRgb_;
     bool hasPreviousRgb_ = false;
     bool displayActive_ = true;
+    bool protectedContentMaskedOut_ = false;
     std::string displayStatusReason_;
     int contentBoundsHoldFrames_ = 0;
     ContentBounds lastContentBounds_;
@@ -730,6 +733,7 @@ private:
         previousRgb_ = rgb_;
         hasPreviousRgb_ = true;
         displayActive_ = false;
+        protectedContentMaskedOut_ = false;
         displayStatusReason_ = reason;
         contentBoundsHoldFrames_ = 0;
         lastContentBounds_ = ContentBounds{};
@@ -1260,6 +1264,7 @@ int main(int argc, char** argv)
                       << ",\"deadband\":" << sampler.deadband()
                       << ",\"displayActive\":" << (sampler.displayActive() ? "true" : "false")
                       << ",\"displayStatusReason\":\"" << escapeJson(sampler.displayStatusReason()) << "\""
+                      << ",\"protectedContentMaskedOut\":" << (sampler.protectedContentMaskedOut() ? "true" : "false")
                       << ",\"cols\":" << sampler.cols()
                       << ",\"rows\":" << sampler.rows()
                       << ",\"elapsedMs\":" << elapsedMs

@@ -68,6 +68,7 @@ describe("dx light frame coasting", () => {
     expect(isProtectedCaptureReason("DuplicateOutput failed: E_ACCESSDENIED")).toBe(true);
     expect(isProtectedCaptureReason("DuplicateOutput failed: DXGI_ERROR_INVALID_CALL")).toBe(true);
     expect(isProtectedCaptureReason("AcquireNextFrame failed: DXGI_ERROR_INVALID_CALL")).toBe(true);
+    expect(isProtectedCaptureReason("DXGI protected content masked out")).toBe(true);
     expect(isProtectedCaptureReason("AcquireNextFrame failed: DXGI_ERROR_ACCESS_LOST")).toBe(false);
     expect(isProtectedCaptureReason("DuplicateOutput failed: DXGI_ERROR_ACCESS_LOST")).toBe(false);
     expect(isProtectedCaptureReason("DuplicateOutput failed: DXGI_ERROR_UNSUPPORTED")).toBe(false);
@@ -94,6 +95,7 @@ describe("dx light frame coasting", () => {
 
     expect(shouldCoastCaptureFrame(blackFrame, "DuplicateOutput failed: E_ACCESSDENIED", true)).toBe(true);
     expect(shouldCoastCaptureFrame(blackFrame, "DuplicateOutput failed: DXGI_ERROR_INVALID_CALL", true)).toBe(true);
+    expect(shouldCoastCaptureFrame(blackFrame, "DXGI protected content masked out", true)).toBe(true);
     expect(shouldCoastCaptureFrame(blackFrame, "AcquireNextFrame failed: DXGI_ERROR_ACCESS_LOST", true)).toBe(false);
     expect(shouldCoastCaptureFrame(blackFrame, "", true)).toBe(false);
     expect(shouldCoastCaptureFrame(blackFrame, "DuplicateOutput failed: E_ACCESSDENIED", false)).toBe(false);

@@ -155,7 +155,7 @@ function isProtectedCaptureReason(reason) {
   if (isDuplicationSessionLossReason(value) || isNativeFallbackReason(value)) {
     return false;
   }
-  return /E_ACCESSDENIED|access denied|DuplicateOutput failed|AcquireNextFrame failed/i.test(value);
+  return /E_ACCESSDENIED|access denied|DuplicateOutput failed|AcquireNextFrame failed|protected content masked out|ProtectedContentMaskedOut/i.test(value);
 }
 
 function isDuplicationSessionLossReason(reason) {
