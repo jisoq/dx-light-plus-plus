@@ -21,6 +21,7 @@ const templateDir = path.join(root, "scripts", "templates");
 const dashboardJsPath = path.join(templateDir, "dx-sync-dashboard.js");
 const dashboardCssPath = path.join(templateDir, "dx-sync-dashboard.css");
 const workerTemplatePath = path.join(templateDir, "screen-capture-worker.edge.cjs");
+const coastingHelperTemplatePath = path.join(templateDir, "dx-light-frame-coasting.cjs");
 const dxgiSamplerPath = path.join(root, "native", "bin", "DxLightDxgiBorderSampler.exe");
 const gdiSamplerPath = path.join(root, "native", "bin", "DxLightBorderSampler.exe");
 const deployedNativeDir = path.join(resourcesDir, "dxlight-native");
@@ -65,6 +66,7 @@ async function applyPatch() {
   assertFile(dashboardJsPath);
   assertFile(dashboardCssPath);
   assertFile(workerTemplatePath);
+  assertFile(coastingHelperTemplatePath);
   assertFile(dxgiSamplerPath);
 
   if (shouldRestart) {
@@ -112,6 +114,7 @@ function patchExtractedApp() {
   assertFile(workerPath);
   assertFile(preloadPath);
   assertFile(htmlPath);
+  assertFile(coastingHelperTemplatePath);
 
   let mainSource = fs.readFileSync(indexPath, "utf8");
   mainSource = patchMainBundle(mainSource);
@@ -128,6 +131,7 @@ function patchExtractedApp() {
   fs.copyFileSync(dashboardJsPath, path.join(rendererDir, "dx-sync-dashboard.js"));
   fs.copyFileSync(dashboardCssPath, path.join(rendererDir, "dx-sync-dashboard.css"));
   fs.copyFileSync(workerTemplatePath, workerPath);
+  fs.copyFileSync(coastingHelperTemplatePath, path.join(mainDir, "dx-light-frame-coasting.cjs"));
 
   verifyExtractedApp(extractDir);
   console.log(`Patched ${extractDir}`);
@@ -138,6 +142,8 @@ function patchExtractedApp() {
 function patchMainBundle(source) {
   let next = source;
   const hardwarePowerRecoveryPatch = createHardwarePowerRecoveryPatch();
+
+  next = stripResidualNetflixRouting(next);
 
   next = replaceOnce(next, /u=\d+,p=40/, `u=${samplingRate},p=40`, "screen sampling constant");
 
@@ -281,12 +287,16 @@ function patchMainBundle(source) {
   );
   next = next.replace(
     /nativeBorderSampler:"planned"/g,
-    'nativeBorderSampler:Oe.native&&Oe.native.backend?Oe.native.backend:"planned",nativeFrameMs:Oe.native&&Oe.native.elapsedMs||null,nativeStatusReason:Oe.native&&Oe.native.reason||""',
+    'nativeBorderSampler:Oe.native&&Oe.native.backend?Oe.native.backend:"planned",nativeFrameMs:Oe.native&&Oe.native.elapsedMs||null,nativeStatusReason:Oe.native&&Oe.native.reason||"",contentBoundsActive:!!(Oe.native&&Oe.native.contentBoundsActive),contentLeft:Oe.native&&Oe.native.contentLeft||0,contentRight:Oe.native&&Oe.native.contentRight||0,coastingActive:!!(Oe.native&&Oe.native.coastingActive),captureDegraded:!!(Oe.native&&Oe.native.captureDegraded),nativeCooldownMs:Oe.native&&Oe.native.nativeCooldownMs||0,coastingAgeMs:Oe.native&&Oe.native.coastingAgeMs||null',
   );
   next = next.replace(/nativeFallbackReason:/g, "nativeStatusReason:");
   next = next.replace(
     /nativeStatusReason:Oe\.native&&Oe\.native\.reason\|\|""(?!,contentBoundsActive)/g,
     'nativeStatusReason:Oe.native&&Oe.native.reason||"",contentBoundsActive:!!(Oe.native&&Oe.native.contentBoundsActive),contentLeft:Oe.native&&Oe.native.contentLeft||0,contentRight:Oe.native&&Oe.native.contentRight||0',
+  );
+  next = next.replace(
+    /contentRight:Oe\.native&&Oe\.native\.contentRight\|\|0(?!,coastingActive)/g,
+    'contentRight:Oe.native&&Oe.native.contentRight||0,coastingActive:!!(Oe.native&&Oe.native.coastingActive),captureDegraded:!!(Oe.native&&Oe.native.captureDegraded),nativeCooldownMs:Oe.native&&Oe.native.nativeCooldownMs||0,coastingAgeMs:Oe.native&&Oe.native.coastingAgeMs||null',
   );
 
   if (!next.includes("dxLightSyncDashboard:status")) {
@@ -442,6 +452,7 @@ function patchRendererHtml(source) {
 function verifyExtractedApp(directory) {
   const main = fs.readFileSync(path.join(directory, ".webpack", "main", "index.js"), "utf8");
   const worker = fs.readFileSync(path.join(directory, ".webpack", "main", "611cf1f512da07cc30d9.js"), "utf8");
+  const coastingHelper = fs.readFileSync(path.join(directory, ".webpack", "main", "dx-light-frame-coasting.cjs"), "utf8");
   const preload = fs.readFileSync(path.join(directory, ".webpack", "renderer", "main_window", "preload.js"), "utf8");
   const html = fs.readFileSync(path.join(directory, ".webpack", "renderer", "main_window", "index.html"), "utf8");
 
@@ -473,17 +484,30 @@ function verifyExtractedApp(directory) {
     [main, "DX Light display-removed turn off failed"],
     [main, "contentBoundsActive"],
     [main, "nativeStatusReason"],
+    [main, "coastingActive"],
+    [main, "captureDegraded"],
+    [main, "nativeCooldownMs"],
     [main, "dxLightSyncDashboard:status"],
     [main, "width:1120,height:760"],
     [main, "De.setResizable(!0)"],
     [worker, "edgeCapture"],
     [worker, "DxLightDxgiBorderSampler.exe"],
+    [worker, "dx-light-frame-coasting.cjs"],
     [worker, "native-border-status"],
     [worker, "scheduleNativeSamplerRestart"],
+    [worker, "enterNativeCooldown"],
+    [worker, "DX_LIGHT_NATIVE_RECOVERY_COOLDOWN_MS"],
+    [worker, "coastingActive"],
+    [worker, "captureDegraded"],
+    [worker, "nativeCooldownMs"],
     [worker, "startSequentialEdgeCapture"],
     [worker, "displayActive: true"],
     [worker, "native ready timeout"],
     [worker, "parentPort.postMessage"],
+    [coastingHelper, "createFrameCoaster"],
+    [coastingHelper, "isProtectedCaptureReason"],
+    [coastingHelper, "shouldCoastCaptureFrame"],
+    [coastingHelper, "DEFAULT_COAST_MS = 8000"],
     [preload, "dxLightSyncDashboard"],
     [html, "dx-sync-dashboard.css"],
     [html, "dx-sync-dashboard.js"],
@@ -492,6 +516,32 @@ function verifyExtractedApp(directory) {
   for (const [content, marker] of markers) {
     if (!content.includes(marker)) {
       throw new Error(`Expected marker missing after patch: ${marker}`);
+    }
+  }
+
+  const absentContents = [
+    ["main", main],
+    ["worker", worker],
+    ["coasting-helper", coastingHelper],
+    ["preload", preload],
+    ["html", html],
+  ];
+  const absentMarkers = [
+    "DxLightNetflix",
+    "DxLightNetflixFallback",
+    "DxLightNetflixActive",
+    "DX Light Netflix fallback active",
+    "Netflix",
+    "넷플릭스",
+    "media-context",
+    "protectedLikely",
+  ];
+
+  for (const [label, content] of absentContents) {
+    for (const marker of absentMarkers) {
+      if (content.includes(marker)) {
+        throw new Error(`Unexpected Netflix/media routing marker after patch in ${label}: ${marker}`);
+      }
     }
   }
 }
@@ -572,6 +622,30 @@ function replaceOnce(source, pattern, replacement, label) {
     throw new Error(`Patch anchor not found: ${label}`);
   }
   return source.replace(pattern, replacement);
+}
+
+function stripResidualNetflixRouting(source) {
+  let next = source.replace(/\b([A-Za-z_$][\w$]*)=DxLightNetflixFallback\(\1\);/g, "");
+
+  const declarationStart = next.indexOf("const{execFileSync:DxLightExecFileSync}");
+  if (declarationStart < 0) {
+    if (next.includes("DxLightNetflix")) {
+      throw new Error("Unexpected residual Netflix routing shape in main bundle.");
+    }
+    return next;
+  }
+
+  const declarationEndMarker = ";const{convertToBlack:";
+  const declarationEnd = next.indexOf(declarationEndMarker, declarationStart);
+  if (declarationEnd < 0) {
+    throw new Error("Could not find residual Netflix routing declaration end.");
+  }
+
+  next = `${next.slice(0, declarationStart)}const{convertToBlack:${next.slice(declarationEnd + declarationEndMarker.length)}`;
+  if (next.includes("DxLightNetflix")) {
+    throw new Error("Residual Netflix routing marker remains in main bundle.");
+  }
+  return next;
 }
 
 function assertFile(filePath) {

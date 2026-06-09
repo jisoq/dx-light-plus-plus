@@ -5,7 +5,6 @@ import { BridgeLightDeviceAdapter } from './device/bridgeDeviceAdapter';
 import { createSolidColorFrame } from './domain/ledFrame';
 import { createOrderedSamplingRegions } from './domain/ledLayout';
 import { AdaptiveOptimizer } from './domain/optimizer';
-import { createProtectedContentFallbackFrame, frameAverageColor, isProtectedCaptureSample } from './domain/protectedContentFallback';
 import { domainToPreviewDomain, effectiveDisplayAreaPercent, previewFrameBounds, previewPointToFramePoint } from './domain/samplingFrame';
 import {
   DEFAULT_LED_COUNT,
@@ -20,7 +19,6 @@ import type {
   InstallationDirection,
   LightDeviceAdapter,
   LightDeviceInfo,
-  MediaContext,
   OptimizerState,
   RgbColor,
   SamplingFrameMode,
@@ -32,9 +30,6 @@ import type {
 const INITIAL_METRICS: SyncMetrics = { frameMs: 0, captureMs: 0, writeMs: 0, droppedFrames: 0 };
 const BLACK: RgbColor = { r: 0, g: 0, b: 0 };
 const UI_UPDATE_INTERVAL_MS = 200;
-const MEDIA_CONTEXT_PROBE_COOLDOWN_MS = 5000;
-const MEDIA_CONTEXT_FALLBACK_RECHECK_MS = 10000;
-const PROTECTED_CAPTURE_TRIGGER_FRAMES = 8;
 
 type ResizeHandle = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
 type DragMode = 'move' | ResizeHandle;
@@ -67,11 +62,6 @@ export default function App() {
   const dragRef = useRef<DragState | null>(null);
   const autoConnectAttemptedRef = useRef(false);
   const settingsSaveTimerRef = useRef<number | null>(null);
-  const blockedCaptureFramesRef = useRef(0);
-  const fallbackActiveRef = useRef(false);
-  const mediaContextRef = useRef<MediaContext | null>(null);
-  const mediaContextProbeInFlightRef = useRef(false);
-  const lastMediaContextProbeAtRef = useRef(0);
 
   const [status, setStatus] = useState<SyncStatus>('idle');
   const [regions, setRegions] = useState<SamplingRegion[]>(initialSettings.regions);
@@ -90,8 +80,6 @@ export default function App() {
   const [startupEnabled, setStartupEnabled] = useState(false);
   const [startupBusy, setStartupBusy] = useState(false);
   const [captureBlocked, setCaptureBlocked] = useState(false);
-  const [fallbackActive, setFallbackActive] = useState(false);
-  const [mediaContext, setMediaContext] = useState<MediaContext | null>(null);
 
   const currentSettings = useMemo<AppSettings>(() => normalizeAppSettings({
     regions,
@@ -125,22 +113,6 @@ export default function App() {
       disposed = true;
     };
   }, [bridgeAdapter]);
-
-  useEffect(() => {
-    mediaContextRef.current = mediaContext;
-  }, [mediaContext]);
-
-  useEffect(() => {
-    if (status === 'syncing' || status === 'capturing') {
-      return;
-    }
-
-    blockedCaptureFramesRef.current = 0;
-    mediaContextProbeInFlightRef.current = false;
-    lastMediaContextProbeAtRef.current = 0;
-    mediaContextRef.current = null;
-    setMediaContext(null);
-  }, [status]);
 
   useEffect(() => {
     saveLocalAppSettings(currentSettings);
@@ -247,8 +219,6 @@ export default function App() {
       setMessage('Waiting for screen capture');
       await captureService.start();
       setCaptureBlocked(false);
-      setFallbackMode(false);
-      blockedCaptureFramesRef.current = 0;
       runningRef.current = true;
       lastFrameAtRef.current = performance.now();
       lastUiUpdateAtRef.current = 0;
@@ -269,8 +239,6 @@ export default function App() {
       frameRef.current = null;
     }
     captureService.stop();
-    setFallbackMode(false);
-    blockedCaptureFramesRef.current = 0;
     setStatus('idle');
     setMessage('Stopped');
     void turnOffConnectedDevice();
@@ -362,37 +330,16 @@ export default function App() {
     frameIndexRef.current += 1;
 
     const sample = captureService.sampleLedFrame(regions, { direction: installationDirection, ledCount }, state.sampleStride, { mode: samplingFrameMode });
-    const protectedSample = sample ? isProtectedCaptureSample(sample) : false;
-    if (protectedSample) {
-      blockedCaptureFramesRef.current += 1;
-    } else if (sample) {
-      blockedCaptureFramesRef.current = 0;
-      if (!fallbackActiveRef.current && mediaContextRef.current?.protectedLikely) {
-        updateMediaContext(null);
-      }
-    }
-
-    if (fallbackActiveRef.current || blockedCaptureFramesRef.current >= PROTECTED_CAPTURE_TRIGGER_FRAMES) {
-      requestMediaContextProbe(now);
-    }
-
-    const protectedContext = Boolean(mediaContextRef.current?.protectedLikely);
-    const shouldUseFallback = protectedContext && (blockedCaptureFramesRef.current >= PROTECTED_CAPTURE_TRIGGER_FRAMES || (fallbackActiveRef.current && (!sample || protectedSample)));
-    if (!sample && !shouldUseFallback) {
+    if (!sample) {
       frameRef.current = window.requestAnimationFrame(runFrame);
       return;
     }
 
-    const fallbackFrame = shouldUseFallback ? createProtectedContentFallbackFrame({ ledCount, timeMs: now }) : null;
-    const ledFrame = fallbackFrame ?? sample?.ledFrame;
-    const displayColor = fallbackFrame ? frameAverageColor(fallbackFrame) : sample?.color ?? BLACK;
-    setFallbackMode(shouldUseFallback);
-    if (!ledFrame) {
-      frameRef.current = window.requestAnimationFrame(runFrame);
-      return;
-    }
+    const ledFrame = sample.ledFrame;
+    const displayColor = sample.color;
 
     let writeMs = 0;
+    // Browser capture has no protected-content reason signal, so preserve legitimate black frames here.
     const shouldSend = deviceConnected && frameIndexRef.current % state.sendEvery === 0;
     if (shouldSend) {
       try {
@@ -407,7 +354,7 @@ export default function App() {
     const frameFinishedAt = performance.now();
     const nextMetrics: SyncMetrics = {
       frameMs: frameFinishedAt - frameStartedAt,
-      captureMs: sample?.captureMs ?? 0,
+      captureMs: sample.captureMs,
       writeMs,
       droppedFrames: Math.max(0, Math.floor((frameFinishedAt - frameStartedAt) / minFrameMs) - 1)
     };
@@ -420,56 +367,6 @@ export default function App() {
       setOptimizer(nextOptimizer);
     }
     frameRef.current = window.requestAnimationFrame(runFrame);
-  }
-
-  function setFallbackMode(active: boolean) {
-    if (fallbackActiveRef.current === active) {
-      return;
-    }
-
-    fallbackActiveRef.current = active;
-    setFallbackActive(active);
-    setMessage(active ? 'Netflix protected video detected; using ambient fallback' : 'Screen sync running');
-  }
-
-  function updateMediaContext(context: MediaContext | null) {
-    mediaContextRef.current = context;
-    setMediaContext(context);
-  }
-
-  function requestMediaContextProbe(now: number) {
-    if (mediaContextProbeInFlightRef.current) {
-      return;
-    }
-
-    const recheckMs = fallbackActiveRef.current ? MEDIA_CONTEXT_FALLBACK_RECHECK_MS : MEDIA_CONTEXT_PROBE_COOLDOWN_MS;
-    if (lastMediaContextProbeAtRef.current !== 0 && now - lastMediaContextProbeAtRef.current < recheckMs) {
-      return;
-    }
-
-    lastMediaContextProbeAtRef.current = now;
-    mediaContextProbeInFlightRef.current = true;
-    void resolveWithTimeout(bridgeAdapter.getMediaContext(), 800, null)
-      .then((context) => {
-        if (!runningRef.current) {
-          updateMediaContext(null);
-          return;
-        }
-
-        updateMediaContext(context);
-        if (!context?.protectedLikely && fallbackActiveRef.current) {
-          setFallbackMode(false);
-        }
-      })
-      .catch(() => {
-        updateMediaContext(null);
-        if (fallbackActiveRef.current) {
-          setFallbackMode(false);
-        }
-      })
-      .finally(() => {
-        mediaContextProbeInFlightRef.current = false;
-      });
   }
 
   function addRegion() {
@@ -567,8 +464,8 @@ export default function App() {
     });
   }, [installationDirection, ledCount, regions]);
   const colorCss = `rgb(${color.r}, ${color.g}, ${color.b})`;
-  const statusLabel = fallbackActive ? 'Fallback' : status === 'syncing' ? 'Running' : status === 'capturing' ? 'Starting' : status === 'error' ? 'Error' : 'Idle';
-  const statusClass = fallbackActive ? 'fallback' : status;
+  const statusLabel = status === 'syncing' ? 'Running' : status === 'capturing' ? 'Starting' : status === 'error' ? 'Error' : 'Idle';
+  const statusClass = status;
   const sampledArea = effectiveDisplayAreaPercent(regions, samplingFrameMode);
   const areaLabel = `${sampledArea.toFixed(1)}% sampled`;
 
@@ -775,9 +672,6 @@ export default function App() {
               <Metric label="Capture" value={`${metrics.captureMs.toFixed(1)} ms`} />
               <Metric label="Write" value={`${metrics.writeMs.toFixed(1)} ms`} />
             </div>
-            {mediaContext?.protectedLikely ? (
-              <p className="device-state">Netflix context detected from {mediaContext.source}</p>
-            ) : null}
             <p className="optimizer-reason">{optimizer.reason}</p>
           </section>
         </div>

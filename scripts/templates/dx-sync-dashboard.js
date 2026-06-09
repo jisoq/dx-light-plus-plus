@@ -141,6 +141,7 @@
               ["밝기", "최대 고정", "RGB 255"],
               ["샘플링", `${capture.samplingRate || 0}px`, `${capture.edgeNumber || 3}면`],
               ["래터박스", capture.contentBoundsActive ? "회피 중" : "자동 감지", contentBoundsLabel(capture)],
+              ["보호 콘텐츠", coastingStateLabel(capture), coastingStateSub(capture)],
               ["프레임 지연", formatAge(runtime.lastFrameAgeMs), runtime.signature ? "프레임 변화 감지 중" : "프레임 대기 중"],
               ["장치", device ? `LED ${device.lampsAmount}개` : "연결 대기", device ? device.name : "대기 중"],
             ])}
@@ -181,6 +182,7 @@
             ["래터박스", capture.contentBoundsActive ? "활성 영역 사용" : "자동 감지", contentBoundsLabel(capture)],
             ["샘플링", `${capture.samplingRate || 0}px`, "논리 픽셀"],
             ["네이티브", nativeSamplerLabel(capture), nativeSamplerSub(capture)],
+            ["보호 콘텐츠", coastingStateLabel(capture), coastingStateSub(capture)],
             ["우선순위", priorityLabel(capture.priority), "메인 캡쳐 경로"],
             ["중복 생략", capture.duplicateSuppression ? "사용 중" : "꺼짐", runtime.signature || "대기 중"],
             ["마우스 보호", runtime.mouseWorkerRunning ? "실행 중" : "대기", "전경 입력 보호"],
@@ -318,6 +320,7 @@
             <dt>중복 생략</dt><dd>${capture.duplicateSuppression ? "켜짐" : "꺼짐"}</dd>
             <dt>우선순위</dt><dd>${escapeHtml(priorityLabel(capture.priority))}</dd>
             <dt>래터박스 회피</dt><dd>${capture.contentBoundsActive ? "켜짐" : "자동 감지"}</dd>
+            <dt>보호 콘텐츠</dt><dd>${escapeHtml(coastingStateLabel(capture))}</dd>
           </dl>
         </div>
       </section>
@@ -350,6 +353,7 @@
           <tr><td>활성 디스플레이 필터</td><td>${badge(capture.displayFilter ? "정상" : "확인 필요", capture.displayFilter ? "ok" : "warn")}</td><td>${escapeHtml(filterLabel(capture.displayFilter))}</td></tr>
           <tr><td>중복 프레임 생략</td><td>${badge(capture.duplicateSuppression ? "정상" : "꺼짐", capture.duplicateSuppression ? "ok" : "off")}</td><td>${escapeHtml(runtime.signature || "대기 중")}</td></tr>
           <tr><td>네이티브 샘플러</td><td>${badge(nativeSamplerLabel(capture), capture.mode === "native-border" && !nativeSamplerReason(capture) ? "ok" : "warn")}</td><td>${escapeHtml(nativeSamplerSub(capture))}</td></tr>
+          <tr><td>보호 콘텐츠 처리</td><td>${badge(coastingStateLabel(capture), capture.captureDegraded ? "warn" : "ok")}</td><td>${escapeHtml(coastingStateSub(capture))}</td></tr>
           <tr><td>래터박스 회피</td><td>${badge(capture.contentBoundsActive ? "동작 중" : "감지 대기", capture.contentBoundsActive ? "ok" : "warn")}</td><td>${escapeHtml(contentBoundsLabel(capture))}</td></tr>
         </tbody>
       </table>
@@ -401,6 +405,12 @@
   }
 
   function nativeSamplerLabel(capture) {
+    if (capture.coastingActive) {
+      return "감쇠 유지";
+    }
+    if (capture.captureDegraded) {
+      return Number(capture.nativeCooldownMs) > 0 ? "쿨다운" : "저하됨";
+    }
     if (capture.mode === "native-border") {
       return nativeSamplerReason(capture) ? "재시도" : "실행 중";
     }
@@ -415,6 +425,9 @@
   }
 
   function nativeSamplerSub(capture) {
+    if (capture.coastingActive || capture.captureDegraded) {
+      return coastingStateSub(capture);
+    }
     if (capture.nativeFrameMs) {
       return `${Number(capture.nativeFrameMs).toFixed(2)}ms · ${capture.nativeBorderSampler || "DXGI"}`;
     }
@@ -426,6 +439,38 @@
       return capture.nativeBorderSampler;
     }
     return "DXGI 테두리 전용";
+  }
+
+  function coastingStateLabel(capture) {
+    if (capture.coastingActive) {
+      return "감쇠 유지";
+    }
+    if (capture.captureDegraded) {
+      return "쿨다운";
+    }
+    return "정상";
+  }
+
+  function coastingStateSub(capture) {
+    const cooldownMs = Math.max(0, Number(capture.nativeCooldownMs) || 0);
+    if (cooldownMs > 0) {
+      return `${formatDuration(cooldownMs)} 후 probe`;
+    }
+    if (capture.coastingActive) {
+      return "최근 정상 색 흐름 사용";
+    }
+    if (capture.captureDegraded) {
+      return nativeSamplerReason(capture) || "캡쳐 회복 대기";
+    }
+    return "실제 화면 싱크";
+  }
+
+  function formatDuration(value) {
+    const ms = Math.max(0, Math.round(Number(value) || 0));
+    if (ms < 1000) {
+      return `${ms}ms`;
+    }
+    return `${Math.ceil(ms / 1000)}s`;
   }
 
   function contentBoundsLabel(capture) {

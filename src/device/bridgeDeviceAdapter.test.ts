@@ -146,27 +146,6 @@ describe('BridgeLightDeviceAdapter', () => {
     expect(calls).toEqual(['POST http://bridge.test/open-browser']);
   });
 
-  it('reads media context from the native bridge', async () => {
-    const calls: string[] = [];
-    const adapter = new BridgeLightDeviceAdapter({
-      baseUrl: 'http://bridge.test',
-      fetchImpl: (async (url, init) => {
-        calls.push(`${init?.method ?? 'GET'} ${url}`);
-        return jsonResponse({
-          protectedLikely: true,
-          mediaApp: 'netflix',
-          source: 'window-title',
-          matches: [{ processName: 'msedge', title: 'Netflix - Microsoft Edge' }]
-        });
-      }) as typeof fetch
-    });
-
-    await expect(adapter.getMediaContext()).resolves.toMatchObject({
-      protectedLikely: true,
-      mediaApp: 'netflix'
-    });
-    expect(calls).toEqual(['GET http://bridge.test/media-context']);
-  });
 });
 
 function jsonResponse(body: unknown, status = 200): Response {

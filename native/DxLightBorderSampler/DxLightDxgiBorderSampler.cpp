@@ -2,14 +2,15 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
-#include <lowlevelmonitorconfigurationapi.h>
-#include <physicalmonitorenumerationapi.h>
+#include <powersetting.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -19,6 +20,10 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#ifndef DEVICE_NOTIFY_CALLBACK
+#define DEVICE_NOTIFY_CALLBACK 0x00000002
+#endif
 
 template <typename T>
 static void releaseCom(T*& value)
@@ -172,15 +177,12 @@ static bool isDuplicationSessionLoss(HRESULT hr)
 
 static bool shouldRetryDuplicateOutput(HRESULT hr)
 {
-    return hr != DXGI_ERROR_UNSUPPORTED && hr != E_INVALIDARG;
+    return hr != DXGI_ERROR_UNSUPPORTED &&
+        hr != E_INVALIDARG &&
+        hr != E_ACCESSDENIED &&
+        hr != DXGI_ERROR_ACCESS_LOST &&
+        hr != DXGI_ERROR_INVALID_CALL;
 }
-
-enum class MonitorPowerProbeResult
-{
-    Unknown,
-    On,
-    LowPower
-};
 
 static std::string base64Encode(const std::vector<uint8_t>& bytes)
 {
@@ -303,77 +305,6 @@ static bool displayConfigTargetIsAvailable(const WCHAR* gdiDeviceName, std::stri
     return true;
 }
 
-static std::string hexMonitorPowerMode(DWORD value)
-{
-    std::ostringstream output;
-    output << "0x"
-           << std::uppercase << std::hex << std::setw(2) << std::setfill('0')
-           << value;
-    return output.str();
-}
-
-static bool isKnownLowPowerMonitorMode(DWORD value)
-{
-    return value >= 0x02 && value <= 0x05;
-}
-
-static MonitorPowerProbeResult queryPhysicalMonitorPower(HMONITOR monitor, DWORD& powerMode)
-{
-    if (!monitor)
-    {
-        return MonitorPowerProbeResult::Unknown;
-    }
-
-    DWORD physicalMonitorCount = 0;
-    if (!GetNumberOfPhysicalMonitorsFromHMONITOR(monitor, &physicalMonitorCount) ||
-        physicalMonitorCount == 0)
-    {
-        return MonitorPowerProbeResult::Unknown;
-    }
-
-    std::vector<PHYSICAL_MONITOR> physicalMonitors(physicalMonitorCount);
-    if (!GetPhysicalMonitorsFromHMONITOR(monitor, physicalMonitorCount, physicalMonitors.data()))
-    {
-        return MonitorPowerProbeResult::Unknown;
-    }
-
-    MonitorPowerProbeResult result = MonitorPowerProbeResult::Unknown;
-    DWORD lowPowerMode = 0;
-    for (const PHYSICAL_MONITOR& physicalMonitor : physicalMonitors)
-    {
-        DWORD currentValue = 0;
-        DWORD maximumValue = 0;
-        MC_VCP_CODE_TYPE codeType{};
-        if (!GetVCPFeatureAndVCPFeatureReply(
-            physicalMonitor.hPhysicalMonitor,
-            0xD6,
-            &codeType,
-            &currentValue,
-            &maximumValue))
-        {
-            continue;
-        }
-
-        if (currentValue == 0x01)
-        {
-            result = MonitorPowerProbeResult::On;
-            break;
-        }
-        if (isKnownLowPowerMonitorMode(currentValue))
-        {
-            result = MonitorPowerProbeResult::LowPower;
-            lowPowerMode = currentValue;
-        }
-    }
-
-    DestroyPhysicalMonitors(physicalMonitorCount, physicalMonitors.data());
-    if (result == MonitorPowerProbeResult::LowPower)
-    {
-        powerMode = lowPowerMode;
-    }
-    return result;
-}
-
 static OutputSelection selectOutput(const Options& options)
 {
     IDXGIFactory1* factory = nullptr;
@@ -431,6 +362,121 @@ static OutputSelection selectOutput(const Options& options)
     return selected;
 }
 
+class MonitorPowerObserver
+{
+public:
+    MonitorPowerObserver()
+    {
+        params_.Callback = &MonitorPowerObserver::notifyCallback;
+        params_.Context = this;
+        if (!registerFor(kGuidSessionDisplayStatus, "session display status"))
+        {
+            registerFor(kGuidConsoleDisplayState, "console display state");
+        }
+    }
+
+    ~MonitorPowerObserver()
+    {
+        if (registration_)
+        {
+            PowerSettingUnregisterNotification(registration_);
+            registration_ = nullptr;
+        }
+    }
+
+    MonitorPowerObserver(const MonitorPowerObserver&) = delete;
+    MonitorPowerObserver& operator=(const MonitorPowerObserver&) = delete;
+
+    bool displayActive() const
+    {
+        return displayState_.load(std::memory_order_relaxed) != PowerMonitorOff;
+    }
+
+    std::string inactiveReason() const
+    {
+        return "session display power state is off";
+    }
+
+private:
+    using PowerSettingCallback = ULONG(CALLBACK*)(PVOID, ULONG, PVOID);
+
+    struct PowerSettingSubscribeParameters
+    {
+        PowerSettingCallback Callback = nullptr;
+        PVOID Context = nullptr;
+    };
+
+    static constexpr DWORD PowerMonitorOff = 0;
+    static constexpr DWORD PowerMonitorOn = 1;
+    static constexpr DWORD PowerMonitorDim = 2;
+    static const GUID kGuidSessionDisplayStatus;
+    static const GUID kGuidConsoleDisplayState;
+
+    PowerSettingSubscribeParameters params_{};
+    HPOWERNOTIFY registration_ = nullptr;
+    std::atomic<DWORD> displayState_{PowerMonitorOn};
+
+    bool registerFor(const GUID& guid, const char* label)
+    {
+        HPOWERNOTIFY handle = nullptr;
+        const DWORD result = PowerSettingRegisterNotification(
+            &guid,
+            DEVICE_NOTIFY_CALLBACK,
+            reinterpret_cast<HANDLE>(&params_),
+            &handle);
+        if (result != ERROR_SUCCESS)
+        {
+            std::cerr << "Power notification registration failed for " << label
+                      << ": " << result << std::endl;
+            return false;
+        }
+
+        registration_ = handle;
+        std::cerr << "Power notification registered for " << label << std::endl;
+        return true;
+    }
+
+    void updateFromPowerSetting(const POWERBROADCAST_SETTING& setting)
+    {
+        if (!guidEquals(setting.PowerSetting, kGuidSessionDisplayStatus) &&
+            !guidEquals(setting.PowerSetting, kGuidConsoleDisplayState))
+        {
+            return;
+        }
+        if (setting.DataLength < sizeof(DWORD))
+        {
+            return;
+        }
+
+        DWORD state = PowerMonitorOn;
+        std::memcpy(&state, setting.Data, sizeof(state));
+        if (state == PowerMonitorOff || state == PowerMonitorOn || state == PowerMonitorDim)
+        {
+            displayState_.store(state, std::memory_order_relaxed);
+        }
+    }
+
+    static bool guidEquals(const GUID& left, const GUID& right)
+    {
+        return std::memcmp(&left, &right, sizeof(GUID)) == 0;
+    }
+
+    static ULONG CALLBACK notifyCallback(PVOID context, ULONG type, PVOID setting)
+    {
+        if (context && type == PBT_POWERSETTINGCHANGE && setting)
+        {
+            static_cast<MonitorPowerObserver*>(context)->updateFromPowerSetting(
+                *static_cast<POWERBROADCAST_SETTING*>(setting));
+        }
+        return ERROR_SUCCESS;
+    }
+};
+
+const GUID MonitorPowerObserver::kGuidSessionDisplayStatus =
+    {0x2b84c20e, 0xad23, 0x4ddf, {0x93, 0xdb, 0x05, 0xff, 0xbd, 0x7e, 0xfc, 0xa5}};
+const GUID MonitorPowerObserver::kGuidConsoleDisplayState =
+    {0x6fe69556, 0x704a, 0x47a0, {0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47}};
+
 class DxgiSampler
 {
 public:
@@ -464,6 +510,7 @@ public:
     int deadband() const { return options_.deadband; }
     bool displayActive() const { return displayActive_; }
     const std::string& displayStatusReason() const { return displayStatusReason_; }
+    bool protectedContentMaskedOut() const { return protectedContentMaskedOut_; }
     bool contentBoundsActive() const { return lastContentBounds_.active; }
     int contentBoundsLeft() const { return lastContentBounds_.left; }
     int contentBoundsRight() const { return lastContentBounds_.right; }
@@ -485,17 +532,12 @@ public:
                     return blankFrame(reason);
                 }
                 displayActive_ = true;
-                displayStatusReason_.clear();
+                displayStatusReason_ = protectedContentMaskedOut_ ? "DXGI protected content masked out" : "";
                 return rgb_;
             }
             if (isDuplicationSessionLoss(hr))
             {
-                const std::string reason = "duplication session lost: " + describeHresult(hr);
-                std::cerr << "Recovering DXGI duplication after AcquireNextFrame failed: "
-                          << describeHresult(hr) << std::endl;
-                blankFrame(reason);
-                resetDeviceResources();
-                return rgb_;
+                throw std::runtime_error("AcquireNextFrame failed: " + describeHresult(hr));
             }
             throw std::runtime_error("AcquireNextFrame failed: " + describeHresult(hr));
         }
@@ -522,6 +564,7 @@ public:
         D3D11_TEXTURE2D_DESC frameDesc{};
         frame->GetDesc(&frameDesc);
         format_ = frameDesc.Format;
+        protectedContentMaskedOut_ = frameInfo.ProtectedContentMaskedOut != FALSE;
         ensureSupportedFormat();
 
         try
@@ -546,7 +589,7 @@ public:
             }
             smoothFrame();
             displayActive_ = true;
-            displayStatusReason_.clear();
+            displayStatusReason_ = protectedContentMaskedOut_ ? "DXGI protected content masked out" : "";
         }
         catch (...)
         {
@@ -580,6 +623,7 @@ private:
     };
 
     Options options_;
+    MonitorPowerObserver monitorPower_;
     OutputSelection selection_;
     ID3D11Device* device_ = nullptr;
     ID3D11DeviceContext* context_ = nullptr;
@@ -601,10 +645,8 @@ private:
     std::vector<uint8_t> previousRgb_;
     bool hasPreviousRgb_ = false;
     bool displayActive_ = true;
+    bool protectedContentMaskedOut_ = false;
     std::string displayStatusReason_;
-    bool monitorPowerProbeEverSucceeded_ = false;
-    int monitorPowerProbeFailureCount_ = 0;
-    std::chrono::steady_clock::time_point nextMonitorPowerProbeAt_{};
     int contentBoundsHoldFrames_ = 0;
     ContentBounds lastContentBounds_;
 
@@ -672,49 +714,16 @@ private:
             return false;
         }
 
-        DWORD powerMode = 0;
-        const MonitorPowerProbeResult powerProbe = queryPhysicalMonitorPower(desc.Monitor, powerMode);
-        if (powerProbe == MonitorPowerProbeResult::On)
-        {
-            monitorPowerProbeEverSucceeded_ = true;
-            monitorPowerProbeFailureCount_ = 0;
-            return true;
-        }
-        if (powerProbe == MonitorPowerProbeResult::LowPower)
-        {
-            monitorPowerProbeEverSucceeded_ = true;
-            monitorPowerProbeFailureCount_ = 0;
-            reason = "physical monitor power mode is low-power (" + hexMonitorPowerMode(powerMode) + ")";
-            return false;
-        }
-
-        if (monitorPowerProbeEverSucceeded_)
-        {
-            monitorPowerProbeFailureCount_ += 1;
-            if (monitorPowerProbeFailureCount_ >= 2)
-            {
-                reason = "physical monitor power state is unreachable after previously responding";
-                return false;
-            }
-        }
-
         return true;
     }
 
     bool selectedOutputReadyForFrame(std::string& reason)
     {
-        const auto now = std::chrono::steady_clock::now();
-        if (now < nextMonitorPowerProbeAt_)
+        if (!monitorPower_.displayActive())
         {
-            if (!displayActive_)
-            {
-                reason = displayStatusReason_.empty() ? "selected output is inactive" : displayStatusReason_;
-                return false;
-            }
-            return true;
+            reason = monitorPower_.inactiveReason();
+            return false;
         }
-
-        nextMonitorPowerProbeAt_ = now + std::chrono::milliseconds(1000);
         return isSelectedOutputAvailable(reason);
     }
 
@@ -724,17 +733,11 @@ private:
         previousRgb_ = rgb_;
         hasPreviousRgb_ = true;
         displayActive_ = false;
+        protectedContentMaskedOut_ = false;
         displayStatusReason_ = reason;
         contentBoundsHoldFrames_ = 0;
         lastContentBounds_ = ContentBounds{};
         return rgb_;
-    }
-
-    void resetDeviceResources()
-    {
-        releaseDeviceResources();
-        refreshOutputSelection();
-        initializeDevice();
     }
 
     void initializeDevice()
@@ -769,7 +772,7 @@ private:
         }
 
         HRESULT duplicateHr = S_OK;
-        const int maxAttempts = 20;
+        const int maxAttempts = 2;
         for (int attempt = 1; attempt <= maxAttempts; ++attempt)
         {
             HRESULT hr = selection_.output->QueryInterface(__uuidof(IDXGIOutput1), reinterpret_cast<void**>(&output1_));
@@ -1261,6 +1264,7 @@ int main(int argc, char** argv)
                       << ",\"deadband\":" << sampler.deadband()
                       << ",\"displayActive\":" << (sampler.displayActive() ? "true" : "false")
                       << ",\"displayStatusReason\":\"" << escapeJson(sampler.displayStatusReason()) << "\""
+                      << ",\"protectedContentMaskedOut\":" << (sampler.protectedContentMaskedOut() ? "true" : "false")
                       << ",\"cols\":" << sampler.cols()
                       << ",\"rows\":" << sampler.rows()
                       << ",\"elapsedMs\":" << elapsedMs

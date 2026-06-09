@@ -33,7 +33,6 @@ const MAX_HID_PAYLOAD_BYTES = 64;
 const READ_DEVICE_INFO = 0x82;
 const SET_SYNC_SCREEN = 0x80;
 const AUTO_CONNECT_RETRY_MS = 5000;
-const MEDIA_CONTEXT_TIMEOUT_MS = 1200;
 
 let hid;
 let device = null;
@@ -125,11 +124,6 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'POST' && url.pathname === '/open-browser') {
       openSystemBrowser(`http://${HOST}:${PORT}/`);
       sendJson(response, 200, { ok: true });
-      return;
-    }
-
-    if (request.method === 'GET' && url.pathname === '/media-context') {
-      sendJson(response, 200, await getMediaContext());
       return;
     }
 
@@ -459,105 +453,6 @@ function openSystemBrowser(url) {
     stdio: 'ignore'
   });
   child.unref();
-}
-
-async function getMediaContext() {
-  if (process.platform !== 'win32') {
-    return {
-      protectedLikely: false,
-      mediaApp: null,
-      source: 'unsupported-platform',
-      matches: []
-    };
-  }
-
-  return readWindowsMediaContext();
-}
-
-function readWindowsMediaContext() {
-  const script = [
-    '$matches = @(',
-    '  Get-Process -ErrorAction SilentlyContinue |',
-    '  Where-Object { $_.MainWindowTitle -and ($_.MainWindowTitle -match "Netflix|넷플릭스") } |',
-    '  Select-Object -First 5 ProcessName,MainWindowTitle',
-    ');',
-    '$matches | ConvertTo-Json -Compress'
-  ].join(' ');
-
-  return new Promise((resolve) => {
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true
-    });
-
-    const finish = (payload) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      resolve(payload);
-    };
-
-    const timer = setTimeout(() => {
-      child.kill();
-      finish({
-        protectedLikely: false,
-        mediaApp: null,
-        source: 'window-title-timeout',
-        matches: []
-      });
-    }, MEDIA_CONTEXT_TIMEOUT_MS);
-
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk.toString('utf8');
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString('utf8');
-    });
-    child.on('error', (error) => {
-      finish({
-        protectedLikely: false,
-        mediaApp: null,
-        source: 'window-title-error',
-        matches: [],
-        error: error.message
-      });
-    });
-    child.on('close', () => {
-      const matches = parseMediaContextMatches(stdout);
-      finish({
-        protectedLikely: matches.length > 0,
-        mediaApp: matches.length > 0 ? 'netflix' : null,
-        source: 'window-title',
-        matches,
-        error: stderr.trim() || undefined
-      });
-    });
-  });
-}
-
-function parseMediaContextMatches(raw) {
-  const text = String(raw || '').trim();
-  if (!text) {
-    return [];
-  }
-
-  try {
-    const parsed = JSON.parse(text);
-    const items = Array.isArray(parsed) ? parsed : [parsed];
-    return items
-      .map((item) => ({
-        processName: String(item.ProcessName || item.processName || ''),
-        title: String(item.MainWindowTitle || item.title || '')
-      }))
-      .filter((item) => item.title);
-  } catch {
-    return [];
-  }
 }
 
 function getSafeRelativeStaticPath(requestPath) {
