@@ -525,7 +525,7 @@ function verifyExtractedApp(directory) {
     [worker, "DX_LIGHT_UNSTABLE_SESSION_COOLDOWN_MS"],
     [worker, "createNativeRecoveryPolicy"],
     [worker, "detectProtectedMediaOnDisplay"],
-    [worker, "DX_LIGHT_PROTECTED_MEDIA_PREFLIGHT_HOLD_MS"],
+    [worker, "DX_LIGHT_PROTECTED_MEDIA_PREFLIGHT_RECHECK_MS"],
     [worker, "protectedMediaPreflight"],
     [worker, "coastingActive"],
     [worker, "captureDegraded"],

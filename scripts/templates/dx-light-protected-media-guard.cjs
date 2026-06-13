@@ -259,10 +259,10 @@ public class DxLightWindowApi {
   [DllImport("user32.dll")]
   public static extern bool IsWindowVisible(IntPtr hWnd);
 
-  [DllImport("user32.dll", SetLastError = true)]
+  [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError = true)]
   public static extern int GetWindowTextLength(IntPtr hWnd);
 
-  [DllImport("user32.dll", SetLastError = true)]
+  [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError = true)]
   public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
 
   [DllImport("user32.dll")]

@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
@@ -13,6 +14,7 @@ const {
 } = require("./dx-light-protected-media-guard.cjs");
 
 const display = { x: 0, y: 0, width: 5120, height: 2160 };
+const source = readFileSync(new URL("./dx-light-protected-media-guard.cjs", import.meta.url), "utf8");
 
 describe("dx light protected media guard", () => {
   it("matches Netflix browser windows", () => {
@@ -182,5 +184,11 @@ describe("dx light protected media guard", () => {
       width: 3413,
       height: 1440,
     })).toBe(false);
+  });
+
+  it("uses Unicode Win32 title APIs so localized protected-media titles survive enumeration", () => {
+    expect(source).toContain('[DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError = true)]');
+    expect(source).toContain("public static extern int GetWindowTextLength");
+    expect(source).toContain("public static extern int GetWindowText");
   });
 });
