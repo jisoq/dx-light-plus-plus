@@ -90,7 +90,7 @@ describe("dx light protected media guard", () => {
     }]);
   });
 
-  it("parses process-title fallback output without window coordinates", () => {
+  it("does not treat process-title fallback output as a display-specific match", () => {
     const windows = parseProcessTitleWindows(JSON.stringify({
       ProcessName: "msedge",
       Id: 123,
@@ -102,7 +102,7 @@ describe("dx light protected media guard", () => {
       pid: 123,
       title: "넷플릭스 - 개인 - Microsoft Edge",
     }]);
-    expect(protectedMediaMatchesDisplay(windows[0], display)).toBe(true);
+    expect(protectedMediaMatchesDisplay(windows[0], display)).toBe(false);
   });
 
   it("merges coordinate and process-title window sources", () => {
@@ -138,5 +138,49 @@ describe("dx light protected media guard", () => {
       bottom: 1200,
     }]);
     expect(merged.filter((window) => protectedMediaMatchesDisplay(window, display))).toEqual([]);
+  });
+
+  it("uses Win32 monitor bounds when display coordinates are DPI-virtualized", () => {
+    expect(protectedMediaMatchesDisplay({
+      processName: "msedge",
+      title: "Netflix - Microsoft Edge",
+      left: 4200,
+      top: 100,
+      right: 5000,
+      bottom: 800,
+      monitorDevice: "\\\\.\\DISPLAY1",
+      monitorLeft: 0,
+      monitorTop: 0,
+      monitorRight: 5120,
+      monitorBottom: 2160,
+    }, {
+      displayId: "DISPLAY1",
+      x: 0,
+      y: 0,
+      width: 3413,
+      height: 1440,
+    })).toBe(true);
+  });
+
+  it("rejects windows attributed to another Win32 monitor", () => {
+    expect(protectedMediaMatchesDisplay({
+      processName: "msedge",
+      title: "Netflix - Microsoft Edge",
+      left: 100,
+      top: 100,
+      right: 1200,
+      bottom: 900,
+      monitorDevice: "\\\\.\\DISPLAY2",
+      monitorLeft: 0,
+      monitorTop: 0,
+      monitorRight: 2560,
+      monitorBottom: 1600,
+    }, {
+      displayId: "DISPLAY1",
+      x: 0,
+      y: 0,
+      width: 3413,
+      height: 1440,
+    })).toBe(false);
   });
 });

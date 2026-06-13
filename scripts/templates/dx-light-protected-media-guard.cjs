@@ -43,15 +43,10 @@ function protectedMediaTitleMatches(window) {
 }
 
 function windowOverlapsDisplay(window, display) {
-  const displayRect = normalizeRect({
-    left: display && display.x,
-    top: display && display.y,
-    right: Number(display && display.x) + Number(display && display.width),
-    bottom: Number(display && display.y) + Number(display && display.height),
-  });
   const windowRect = normalizeRect(window);
+  const displayRect = displayRectForWindow(window, display);
   if (!displayRect || !windowRect) {
-    return true;
+    return false;
   }
 
   const left = Math.max(displayRect.left, windowRect.left);
@@ -59,6 +54,36 @@ function windowOverlapsDisplay(window, display) {
   const top = Math.max(displayRect.top, windowRect.top);
   const bottom = Math.min(displayRect.bottom, windowRect.bottom);
   return right > left && bottom > top;
+}
+
+function displayRectForWindow(window, display) {
+  const windowDisplayId = normalizeDisplayId(window && (window.monitorDevice || window.displayId || window.deviceName));
+  const displayId = normalizeDisplayId(display && (display.displayId || display.id || display.name));
+  if (windowDisplayId && displayId) {
+    if (windowDisplayId !== displayId) {
+      return null;
+    }
+    const monitorRect = normalizeRect({
+      left: window && (window.monitorLeft ?? window.MonitorLeft),
+      top: window && (window.monitorTop ?? window.MonitorTop),
+      right: window && (window.monitorRight ?? window.MonitorRight),
+      bottom: window && (window.monitorBottom ?? window.MonitorBottom),
+    });
+    if (monitorRect) {
+      return monitorRect;
+    }
+  }
+
+  return normalizeRect({
+    left: display && display.x,
+    top: display && display.y,
+    right: Number(display && display.x) + Number(display && display.width),
+    bottom: Number(display && display.y) + Number(display && display.height),
+  });
+}
+
+function normalizeDisplayId(value) {
+  return String(value || "").trim().toUpperCase().replace(/^\\\\\.\\/, "");
 }
 
 function normalizeRect(value) {
@@ -127,18 +152,41 @@ function parseWindows(raw) {
   try {
     const parsed = JSON.parse(text);
     return (Array.isArray(parsed) ? parsed : [parsed])
-      .map((item) => ({
-        processName: String(item.processName || item.ProcessName || ""),
-        pid: Number(item.pid || item.Pid || 0),
-        title: String(item.title || item.Title || ""),
-        left: Number(item.left ?? item.Left),
-        top: Number(item.top ?? item.Top),
-        right: Number(item.right ?? item.Right),
-        bottom: Number(item.bottom ?? item.Bottom),
-      }))
+      .map((item) => normalizeParsedWindow(item))
       .filter((item) => item.title);
   } catch {
     return [];
+  }
+}
+
+function normalizeParsedWindow(item) {
+  const window = {
+    processName: String(item.processName || item.ProcessName || ""),
+    pid: Number(item.pid || item.Pid || 0),
+    title: String(item.title || item.Title || ""),
+    left: Number(item.left ?? item.Left),
+    top: Number(item.top ?? item.Top),
+    right: Number(item.right ?? item.Right),
+    bottom: Number(item.bottom ?? item.Bottom),
+  };
+  const monitorDevice = String(item.monitorDevice || item.MonitorDevice || "");
+  if (monitorDevice) {
+    window.monitorDevice = monitorDevice;
+  }
+  addFiniteNumber(window, "monitorLeft", item.monitorLeft ?? item.MonitorLeft);
+  addFiniteNumber(window, "monitorTop", item.monitorTop ?? item.MonitorTop);
+  addFiniteNumber(window, "monitorRight", item.monitorRight ?? item.MonitorRight);
+  addFiniteNumber(window, "monitorBottom", item.monitorBottom ?? item.MonitorBottom);
+  return window;
+}
+
+function addFiniteNumber(target, key, value) {
+  if (value === null || value === undefined || value === "") {
+    return;
+  }
+  const number = Number(value);
+  if (Number.isFinite(number)) {
+    target[key] = number;
   }
 }
 
@@ -222,6 +270,24 @@ public class DxLightWindowApi {
 
   [DllImport("user32.dll")]
   public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+  public const uint MONITOR_DEFAULTTONEAREST = 2;
+
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Auto)]
+  public struct MONITORINFOEX {
+    public int cbSize;
+    public RECT rcMonitor;
+    public RECT rcWork;
+    public int dwFlags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)]
+    public string szDevice;
+  }
+
+  [DllImport("user32.dll")]
+  public static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint dwFlags);
+
+  [DllImport("user32.dll", CharSet=CharSet.Auto)]
+  public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFOEX lpmi);
 }
 "@
 
@@ -240,6 +306,23 @@ $items = New-Object System.Collections.Generic.List[object]
   $process = Get-Process -Id $windowProcessId -ErrorAction SilentlyContinue
   $rect = New-Object DxLightWindowApi+RECT
   [void][DxLightWindowApi]::GetWindowRect($hWnd, [ref]$rect)
+  $monitorDevice = ""
+  $monitorLeft = $null
+  $monitorTop = $null
+  $monitorRight = $null
+  $monitorBottom = $null
+  $monitor = [DxLightWindowApi]::MonitorFromWindow($hWnd, [DxLightWindowApi]::MONITOR_DEFAULTTONEAREST)
+  if ($monitor -ne [IntPtr]::Zero) {
+    $monitorInfo = New-Object DxLightWindowApi+MONITORINFOEX
+    $monitorInfo.cbSize = [Runtime.InteropServices.Marshal]::SizeOf([type][DxLightWindowApi+MONITORINFOEX])
+    if ([DxLightWindowApi]::GetMonitorInfo($monitor, [ref]$monitorInfo)) {
+      $monitorDevice = $monitorInfo.szDevice
+      $monitorLeft = $monitorInfo.rcMonitor.Left
+      $monitorTop = $monitorInfo.rcMonitor.Top
+      $monitorRight = $monitorInfo.rcMonitor.Right
+      $monitorBottom = $monitorInfo.rcMonitor.Bottom
+    }
+  }
   $items.Add([pscustomobject]@{
     processName = if ($process) { $process.ProcessName } else { "" }
     pid = $windowProcessId
@@ -248,6 +331,11 @@ $items = New-Object System.Collections.Generic.List[object]
     top = $rect.Top
     right = $rect.Right
     bottom = $rect.Bottom
+    monitorDevice = $monitorDevice
+    monitorLeft = $monitorLeft
+    monitorTop = $monitorTop
+    monitorRight = $monitorRight
+    monitorBottom = $monitorBottom
   })
   return $true
 }, [IntPtr]::Zero) | Out-Null

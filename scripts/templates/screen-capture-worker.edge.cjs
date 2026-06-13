@@ -55,9 +55,8 @@ const NATIVE_SESSION_LOSS_WINDOW_MS = Math.round(
 const NATIVE_SESSION_LOSS_THRESHOLD = Math.round(
   clampNumber(Number(process.env.DX_LIGHT_SESSION_LOSS_THRESHOLD || 3), 1, 20, 3),
 );
-const PROTECTED_MEDIA_PREFLIGHT_HOLD_MS = Math.max(
-  NATIVE_PROTECTED_CONTENT_COOLDOWN_MS,
-  Math.round(clampNumber(Number(process.env.DX_LIGHT_PROTECTED_MEDIA_PREFLIGHT_HOLD_MS || 600000), 1000, 3600000, 600000)),
+const PROTECTED_MEDIA_PREFLIGHT_RECHECK_MS = Math.round(
+  clampNumber(Number(process.env.DX_LIGHT_PROTECTED_MEDIA_PREFLIGHT_RECHECK_MS || 2000), 1000, 60000, 2000),
 );
 const COAST_TICK_MS = Math.max(33, Math.round(finalSyncSpeed || 80));
 const DEFAULT_OUTPUT_BRIGHTNESS_GAIN = 1;
@@ -639,10 +638,11 @@ function startNativeBorderSampler() {
   if (protectedMedia.protectedLikely) {
     const reason = protectedMedia.reason || "protected media preflight blocked native sampler";
     logNativeSampler(`protected media preflight blocked native sampler reason=${reason} matches=${protectedMedia.matches.length}`);
-    enterNativeCooldown(reason, null, PROTECTED_MEDIA_PREFLIGHT_HOLD_MS, {
+    enterNativeCooldown(reason, null, PROTECTED_MEDIA_PREFLIGHT_RECHECK_MS, {
       protectedMediaPreflight: true,
-      protectedContentCooldown: true,
-      protectedContentCooldownMs: PROTECTED_MEDIA_PREFLIGHT_HOLD_MS,
+      protectedContentCooldown: false,
+      protectedContentCooldownMs: 0,
+      protectedMediaRecheckMs: PROTECTED_MEDIA_PREFLIGHT_RECHECK_MS,
       protectedMediaMatches: protectedMedia.matches.length,
     });
     return true;
