@@ -13,6 +13,12 @@ const {
   isProtectedCaptureReason,
   shouldCoastCaptureFrame,
 } = require("./dx-light-frame-coasting.cjs");
+const {
+  createNativeRecoveryPolicy,
+} = require("./dx-light-native-recovery.cjs");
+const {
+  detectProtectedMediaOnDisplay,
+} = require("./dx-light-protected-media-guard.cjs");
 
 const {
   displays = [],
@@ -35,7 +41,41 @@ let nativeCooldownUntil = 0;
 let nativeFlatFrameCount = 0;
 
 const NATIVE_RECOVERY_COOLDOWN_MS = Math.max(1000, Number(process.env.DX_LIGHT_NATIVE_RECOVERY_COOLDOWN_MS || 30000));
+const NATIVE_PROTECTED_CONTENT_COOLDOWN_MS = Math.max(
+  NATIVE_RECOVERY_COOLDOWN_MS,
+  Math.round(clampNumber(Number(process.env.DX_LIGHT_PROTECTED_CONTENT_COOLDOWN_MS || 600000), 1000, 3600000, 600000)),
+);
+const NATIVE_UNSTABLE_SESSION_COOLDOWN_MS = Math.max(
+  NATIVE_RECOVERY_COOLDOWN_MS,
+  Math.round(clampNumber(Number(process.env.DX_LIGHT_UNSTABLE_SESSION_COOLDOWN_MS || 600000), 1000, 3600000, 600000)),
+);
+const NATIVE_SESSION_LOSS_WINDOW_MS = Math.round(
+  clampNumber(Number(process.env.DX_LIGHT_SESSION_LOSS_WINDOW_MS || 60000), 1000, 600000, 60000),
+);
+const NATIVE_SESSION_LOSS_THRESHOLD = Math.round(
+  clampNumber(Number(process.env.DX_LIGHT_SESSION_LOSS_THRESHOLD || 1), 1, 20, 1),
+);
+const PROTECTED_MEDIA_PREFLIGHT_HOLD_MS = Math.max(
+  NATIVE_PROTECTED_CONTENT_COOLDOWN_MS,
+  Math.round(clampNumber(Number(process.env.DX_LIGHT_PROTECTED_MEDIA_PREFLIGHT_HOLD_MS || 600000), 1000, 3600000, 600000)),
+);
 const COAST_TICK_MS = Math.max(33, Math.round(finalSyncSpeed || 80));
+const DEFAULT_OUTPUT_BRIGHTNESS_GAIN = 1;
+const OUTPUT_BRIGHTNESS_GAIN = clampNumber(
+  Number(process.env.DX_LIGHT_OUTPUT_BRIGHTNESS_GAIN || DEFAULT_OUTPUT_BRIGHTNESS_GAIN),
+  1,
+  2,
+  DEFAULT_OUTPUT_BRIGHTNESS_GAIN,
+);
+const nativeRecoveryPolicy = createNativeRecoveryPolicy({
+  isDuplicationSessionLossReason,
+  isProtectedCaptureReason,
+  recoveryCooldownMs: NATIVE_RECOVERY_COOLDOWN_MS,
+  protectedContentCooldownMs: NATIVE_PROTECTED_CONTENT_COOLDOWN_MS,
+  unstableSessionCooldownMs: NATIVE_UNSTABLE_SESSION_COOLDOWN_MS,
+  sessionLossWindowMs: NATIVE_SESSION_LOSS_WINDOW_MS,
+  sessionLossThreshold: NATIVE_SESSION_LOSS_THRESHOLD,
+});
 const coasters = new Map();
 
 function logNativeSampler(message) {
@@ -119,6 +159,32 @@ const toBytes = (value) => {
   }
   return null;
 };
+
+function clampNumber(value, min, max, fallback) {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, value));
+}
+
+function clampByte(value) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function boostFrameBrightness(frame) {
+  if (OUTPUT_BRIGHTNESS_GAIN <= 1) {
+    return frame;
+  }
+
+  const output = new Uint8Array(frame.length);
+  for (let index = 0; index < frame.length; index += 1) {
+    output[index] = clampByte(Number(frame[index] || 0) * OUTPUT_BRIGHTNESS_GAIN);
+  }
+  return output;
+}
 
 const stateFor = (display, rate) => {
   const cols = Math.max(1, Math.ceil(display.width / rate));
@@ -253,6 +319,7 @@ function postNativeStatus(reason, extra = {}) {
     mode: "native-border",
     backend: "dxgi-desktop-duplication",
     reason: reason || "",
+    brightnessGain: OUTPUT_BRIGHTNESS_GAIN,
     ...extra,
   });
 }
@@ -292,7 +359,7 @@ function coasterFor(displayId) {
 
 function postOutputFrame(displayId, frame) {
   const output = {};
-  output[displayKey(displayId)] = frame;
+  output[displayKey(displayId)] = boostFrameBrightness(frame);
   parentPort.postMessage(output);
 }
 
@@ -392,7 +459,7 @@ function scheduleCoasting(reason, displayId, cols, rows) {
   coastingTimer = setTimeout(tick, COAST_TICK_MS);
 }
 
-function scheduleNativeCooldownProbe(delay) {
+function scheduleNativeCooldownProbe(delay, reason = "") {
   clearNativeCooldownTimer();
   nativeCooldownTimer = setTimeout(() => {
     nativeCooldownTimer = null;
@@ -400,25 +467,28 @@ function scheduleNativeCooldownProbe(delay) {
       return;
     }
     nativeCooldownUntil = 0;
-    logNativeSampler("native cooldown elapsed; probing native sampler once");
+    logNativeSampler(`native cooldown elapsed; probing native sampler once reason=${reason}`);
     startNativeBorderSampler();
   }, Math.max(0, delay));
 }
 
-function enterNativeCooldown(reason, child) {
+function enterNativeCooldown(reason, child, cooldownMs = NATIVE_RECOVERY_COOLDOWN_MS, extraStatus = {}) {
   const display = displays[0];
+  const safeCooldownMs = Math.max(1000, Math.round(Number(cooldownMs) || NATIVE_RECOVERY_COOLDOWN_MS));
   if (!display) {
     postNativeStatus(reason, {
       displayActive: true,
       captureDegraded: true,
       coastingActive: false,
-      nativeCooldownMs: NATIVE_RECOVERY_COOLDOWN_MS,
+      nativeCooldownMs: safeCooldownMs,
+      nativeRecoveryCooldownMs: safeCooldownMs,
+      ...extraStatus,
     });
     return;
   }
 
   clearNativeRestartTimer();
-  nativeCooldownUntil = Date.now() + NATIVE_RECOVERY_COOLDOWN_MS;
+  nativeCooldownUntil = Date.now() + safeCooldownMs;
   nativeRestartAttempts = 0;
   nativeFlatFrameCount = 0;
 
@@ -436,18 +506,19 @@ function enterNativeCooldown(reason, child) {
   }
 
   const grid = gridForDisplay(display);
-  logNativeSampler(`native cooldown ${NATIVE_RECOVERY_COOLDOWN_MS}ms reason=${reason}`);
+  logNativeSampler(`native cooldown ${safeCooldownMs}ms reason=${reason}`);
   const postedCoastingFrame = postCoastedFrame(reason, display.displayId, grid.cols, grid.rows, {
     mode: "native-border",
     backend: "dxgi-desktop-duplication",
-    nativeRecoveryCooldownMs: NATIVE_RECOVERY_COOLDOWN_MS,
+    nativeRecoveryCooldownMs: safeCooldownMs,
+    ...extraStatus,
   });
   if (postedCoastingFrame) {
     scheduleCoasting(reason, display.displayId, grid.cols, grid.rows);
   } else {
     logNativeSampler(`native cooldown has no coasting history; suppressing output reason=${reason}`);
   }
-  scheduleNativeCooldownProbe(NATIVE_RECOVERY_COOLDOWN_MS);
+  scheduleNativeCooldownProbe(safeCooldownMs, reason);
 }
 
 function isDisplayOffReason(reason) {
@@ -540,7 +611,7 @@ function startNativeBorderSampler() {
 
   const cooldownMs = nativeCooldownMs();
   if (cooldownMs > 0) {
-    scheduleNativeCooldownProbe(cooldownMs);
+    scheduleNativeCooldownProbe(cooldownMs, "cooldown still active");
     return true;
   }
 
@@ -564,6 +635,19 @@ function startNativeBorderSampler() {
   }
 
   const display = displays[0];
+  const protectedMedia = detectProtectedMediaOnDisplay(display);
+  if (protectedMedia.protectedLikely) {
+    const reason = protectedMedia.reason || "protected media preflight blocked native sampler";
+    logNativeSampler(`protected media preflight blocked native sampler reason=${reason} matches=${protectedMedia.matches.length}`);
+    enterNativeCooldown(reason, null, PROTECTED_MEDIA_PREFLIGHT_HOLD_MS, {
+      protectedMediaPreflight: true,
+      protectedContentCooldown: true,
+      protectedContentCooldownMs: PROTECTED_MEDIA_PREFLIGHT_HOLD_MS,
+      protectedMediaMatches: protectedMedia.matches.length,
+    });
+    return true;
+  }
+
   const edgeThicknessPx = Math.max(1, Number(process.env.DX_LIGHT_NATIVE_EDGE_THICKNESS_PX || samplingRate * 3));
   const averageRadiusPx = Math.max(0, Number(process.env.DX_LIGHT_NATIVE_AVERAGE_RADIUS_PX || 12));
   const smoothingAlphaPercent = Math.max(1, Math.min(100, Number(process.env.DX_LIGHT_NATIVE_SMOOTHING_ALPHA_PERCENT || 35)));
@@ -617,13 +701,19 @@ function startNativeBorderSampler() {
       logNativeSampler(`holding black frame until sync restarts reason=${reason}`);
       return;
     }
-    if (isDuplicationSessionLossReason(reason)) {
-      logNativeSampler(`recreating native sampler after duplication session loss reason=${reason}`);
-      scheduleNativeSamplerRestart(reason, nativeStartedAt);
+    const recoveryDecision = nativeRecoveryPolicy.classifyFailure(reason);
+    if (recoveryDecision.action === "cooldown") {
+      logNativeSampler(`native recovery cooldown decision=${recoveryDecision.cooldownMs}ms reason=${recoveryDecision.reason}`);
+      enterNativeCooldown(recoveryDecision.reason, child, recoveryDecision.cooldownMs, {
+        protectedContentCooldown: recoveryDecision.protectedContent,
+        protectedContentCooldownMs: recoveryDecision.protectedContent ? recoveryDecision.cooldownMs : 0,
+        sessionLossCount: recoveryDecision.sessionLossCount,
+      });
       return;
     }
-    if (isProtectedCaptureReason(reason)) {
-      enterNativeCooldown(reason, child);
+    if (recoveryDecision.action === "restart" || isDuplicationSessionLossReason(reason)) {
+      logNativeSampler(`recreating native sampler after duplication session loss reason=${reason}`);
+      scheduleNativeSamplerRestart(reason, nativeStartedAt);
       return;
     }
     postBlackFrame(reason);
@@ -636,9 +726,16 @@ function startNativeBorderSampler() {
 
   const readyTimer = setTimeout(() => {
     if (!sawFrame && !exiting) {
-      const reason = stderr.trim() || "native sampler did not produce a frame";
+      const reason = stderr.trim()
+        ? `native sampler did not produce a frame: ${stderr.trim()}`
+        : "native sampler did not produce a frame";
       logNativeSampler(`native ready timeout reason=${reason}`);
-      requestRestart(reason, true);
+      restartScheduled = true;
+      enterNativeCooldown(reason, child, NATIVE_PROTECTED_CONTENT_COOLDOWN_MS, {
+        nativeReadyTimeout: true,
+        protectedContentCooldown: true,
+        protectedContentCooldownMs: NATIVE_PROTECTED_CONTENT_COOLDOWN_MS,
+      });
     }
   }, Math.max(1500, finalSyncSpeed * 10));
 
@@ -742,7 +839,10 @@ function startNativeBorderSampler() {
       if (nativeFlatFrameCount >= 2) {
         restartScheduled = true;
         clearTimeout(readyTimer);
-        enterNativeCooldown(flatReason, child);
+        enterNativeCooldown(flatReason, child, NATIVE_PROTECTED_CONTENT_COOLDOWN_MS, {
+          protectedContentCooldown: true,
+          protectedContentCooldownMs: NATIVE_PROTECTED_CONTENT_COOLDOWN_MS,
+        });
         return;
       }
       postCoastedFrame(flatReason, message.displayId || display.displayId, cols, rows, status);

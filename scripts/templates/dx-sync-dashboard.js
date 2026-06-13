@@ -27,7 +27,7 @@
         </div>
       </div>
       <div class="dx-top-actions">
-        <span class="dx-fixed-mode">최고 반응 · 밝기 최대</span>
+        <span class="dx-fixed-mode">최고 반응 · 밝기 최대 + RGB 게인</span>
         <button class="dx-button dx-button-primary" type="button" data-action="start">싱크 시작</button>
         <button class="dx-button dx-button-danger" type="button" data-action="stop">정지</button>
       </div>
@@ -138,7 +138,7 @@
             ${metrics([
               ["캡쳐", modeLabel(capture.mode), `${capture.intervalMs || 0}ms`],
               ["운영 모드", "최고 반응", "단일 최적화 프로필"],
-              ["밝기", "최대 고정", "RGB 255"],
+              ["밝기", "최대 + RGB 게인", formatBrightnessGain(capture.brightnessGain)],
               ["샘플링", `${capture.samplingRate || 0}px`, `${capture.edgeNumber || 3}면`],
               ["래터박스", capture.contentBoundsActive ? "회피 중" : "자동 감지", contentBoundsLabel(capture)],
               ["보호 콘텐츠", coastingStateLabel(capture), coastingStateSub(capture)],
@@ -178,7 +178,7 @@
           ${metrics([
             ["방식", modeLabel(capture.mode), filterLabel(capture.displayFilter)],
             ["주기", `${capture.intervalMs || 0}ms`, "최고 반응 고정"],
-            ["밝기", "최대 고정", "싱크 시작 시 255 적용"],
+            ["밝기", "최대 + RGB 게인", `싱크 255 · ${formatBrightnessGain(capture.brightnessGain)}`],
             ["래터박스", capture.contentBoundsActive ? "활성 영역 사용" : "자동 감지", contentBoundsLabel(capture)],
             ["샘플링", `${capture.samplingRate || 0}px`, "논리 픽셀"],
             ["네이티브", nativeSamplerLabel(capture), nativeSamplerSub(capture)],
@@ -370,7 +370,7 @@
           <tr><td>캡쳐 주기</td><td>${escapeHtml(`${capture.intervalMs || 0}ms`)}</td></tr>
           <tr><td>샘플링 간격</td><td>${escapeHtml(`${capture.samplingRate || 0}px`)}</td></tr>
           <tr><td>운영 모드</td><td>최고 반응 고정</td></tr>
-          <tr><td>밝기</td><td>최대 고정</td></tr>
+          <tr><td>밝기</td><td>${escapeHtml(`최대 고정 + RGB ${formatBrightnessGain(capture.brightnessGain)}`)}</td></tr>
           <tr><td>래터박스</td><td>${escapeHtml(contentBoundsLabel(capture))}</td></tr>
           <tr><td>싱크 속도</td><td>${escapeHtml(String(settings.syncSpeed || 0))}</td></tr>
           <tr><td>FPS 최적화</td><td>${escapeHtml(settings.fpsOptimization ? "켜짐" : "꺼짐")}</td></tr>
@@ -389,6 +389,11 @@
       return `${age}ms`;
     }
     return `${(age / 1000).toFixed(1)}s`;
+  }
+
+  function formatBrightnessGain(value) {
+    const gain = Number.isFinite(Number(value)) ? Number(value) : 1;
+    return `x${gain.toFixed(2)}`;
   }
 
   function modeLabel(value) {
