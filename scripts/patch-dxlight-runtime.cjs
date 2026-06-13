@@ -22,12 +22,15 @@ const dashboardJsPath = path.join(templateDir, "dx-sync-dashboard.js");
 const dashboardCssPath = path.join(templateDir, "dx-sync-dashboard.css");
 const workerTemplatePath = path.join(templateDir, "screen-capture-worker.edge.cjs");
 const coastingHelperTemplatePath = path.join(templateDir, "dx-light-frame-coasting.cjs");
+const nativeRecoveryHelperTemplatePath = path.join(templateDir, "dx-light-native-recovery.cjs");
+const protectedMediaGuardTemplatePath = path.join(templateDir, "dx-light-protected-media-guard.cjs");
 const dxgiSamplerPath = path.join(root, "native", "bin", "DxLightDxgiBorderSampler.exe");
 const gdiSamplerPath = path.join(root, "native", "bin", "DxLightBorderSampler.exe");
 const deployedNativeDir = path.join(resourcesDir, "dxlight-native");
 
 const samplingRate = numberFromEnv("DX_LIGHT_SAMPLING_RATE", 80, 50, 160);
 const captureInterval = numberFromEnv("DX_LIGHT_CAPTURE_INTERVAL", 50, 20, 160);
+const brightnessGain = decimalFromEnv("DX_LIGHT_OUTPUT_BRIGHTNESS_GAIN", 1, 1, 2);
 const command = process.argv[2] || "apply";
 const shouldRestart = process.argv.includes("--restart");
 
@@ -67,6 +70,8 @@ async function applyPatch() {
   assertFile(dashboardCssPath);
   assertFile(workerTemplatePath);
   assertFile(coastingHelperTemplatePath);
+  assertFile(nativeRecoveryHelperTemplatePath);
+  assertFile(protectedMediaGuardTemplatePath);
   assertFile(dxgiSamplerPath);
 
   if (shouldRestart) {
@@ -115,6 +120,8 @@ function patchExtractedApp() {
   assertFile(preloadPath);
   assertFile(htmlPath);
   assertFile(coastingHelperTemplatePath);
+  assertFile(nativeRecoveryHelperTemplatePath);
+  assertFile(protectedMediaGuardTemplatePath);
 
   let mainSource = fs.readFileSync(indexPath, "utf8");
   mainSource = patchMainBundle(mainSource);
@@ -132,11 +139,14 @@ function patchExtractedApp() {
   fs.copyFileSync(dashboardCssPath, path.join(rendererDir, "dx-sync-dashboard.css"));
   fs.copyFileSync(workerTemplatePath, workerPath);
   fs.copyFileSync(coastingHelperTemplatePath, path.join(mainDir, "dx-light-frame-coasting.cjs"));
+  fs.copyFileSync(nativeRecoveryHelperTemplatePath, path.join(mainDir, "dx-light-native-recovery.cjs"));
+  fs.copyFileSync(protectedMediaGuardTemplatePath, path.join(mainDir, "dx-light-protected-media-guard.cjs"));
 
   verifyExtractedApp(extractDir);
   console.log(`Patched ${extractDir}`);
   console.log(`Sampling rate default: ${samplingRate}`);
   console.log(`Capture interval default: ${captureInterval}ms`);
+  console.log(`Brightness gain default: x${brightnessGain.toFixed(2)}`);
 }
 
 function patchMainBundle(source) {
@@ -253,8 +263,19 @@ function patchMainBundle(source) {
     next = replaceOnce(
       next,
       /let \$e=\[\],Oe=\{\};/,
-      `let $e=[],Oe={};const DxLightDashboardStatus=()=>{const e=Q.get("devices")||[],t=e.find((e=>e&&e.isSyncScreen))||e[0]||null,r=O.getMonitors(),n=DxLightActiveDisplays(),i=Q.get("syncSpeed")?Q.get("syncSpeed"):0;return{patchVersion:"sync-dashboard-v1",capture:{mode:"native-border",displayFilter:"sync-device-display",samplingRate:DxLightCaptureSamplingRate(),intervalMs:DxLightCaptureInterval(i),edgeNumber:DxLightActiveEdgeNumber(),priority:"below-normal",duplicateSuppression:!0,nativeBorderSampler:"planned"},runtime:{syncWorkerRunning:!!ve,mouseWorkerRunning:!!we,lastFrameAt:Oe.t||0,lastFrameAgeMs:Oe.t?Date.now()-Oe.t:null,signature:Oe.sig||null},device:t?{id:t.id,uuid:t.uuid,name:t.name,lampsAmount:t.lampsAmount,displayId:t.displayId,displaySize:t.displaySize,edgeNumber:t.edgeNumber,isSyncScreen:!!t.isSyncScreen,isSwitchOn:!!t.isSwitchOn,version:t.version,type:t.type}:null,monitors:r,activeDisplays:n,settings:{syncSpeed:i,fpsOptimization:Q.get("fpsOptimization")||0,syncColor:Q.get("syncColor")||0,isLightCompression:Q.get("isLightCompression")||0}}},DxLightDashboardApplyProfile=e=>{const r={dxLightCaptureInterval:50,dxLightSamplingRate:${samplingRate},fpsOptimization:1};return Object.keys(r).forEach((e=>Q.set(e,r[e]))),ve&&(Pe(),setTimeout(Re,250)),DxLightDashboardStatus()},DxLightDashboardSetSyncRunning=e=>{const t=!!e,r=O.getMonitors(),n=r[0]&&r[0].displayId,i=(Q.get("devices")||[]).map(((e,r)=>0===r?{...e,isSyncScreen:t,isSwitchOn:!0,syncMode:0,displayId:e.displayId||n||""}:{...e,isSyncScreen:!1}));return Q.set("devices",i),t?Re():Pe(),DxLightDashboardStatus()};`,
+      `let $e=[],Oe={};const DxLightDashboardStatus=()=>{const e=Q.get("devices")||[],t=e.find((e=>e&&e.isSyncScreen))||e[0]||null,r=O.getMonitors(),n=DxLightActiveDisplays(),i=Q.get("syncSpeed")?Q.get("syncSpeed"):0;return{patchVersion:"sync-dashboard-v1",capture:{mode:"native-border",displayFilter:"sync-device-display",samplingRate:DxLightCaptureSamplingRate(),intervalMs:DxLightCaptureInterval(i),edgeNumber:DxLightActiveEdgeNumber(),priority:"below-normal",duplicateSuppression:!0,brightnessGain:Oe.native&&Oe.native.brightnessGain||${brightnessGain},nativeBorderSampler:"planned"},runtime:{syncWorkerRunning:!!ve,mouseWorkerRunning:!!we,lastFrameAt:Oe.t||0,lastFrameAgeMs:Oe.t?Date.now()-Oe.t:null,signature:Oe.sig||null},device:t?{id:t.id,uuid:t.uuid,name:t.name,lampsAmount:t.lampsAmount,displayId:t.displayId,displaySize:t.displaySize,edgeNumber:t.edgeNumber,isSyncScreen:!!t.isSyncScreen,isSwitchOn:!!t.isSwitchOn,version:t.version,type:t.type}:null,monitors:r,activeDisplays:n,settings:{syncSpeed:i,fpsOptimization:Q.get("fpsOptimization")||0,syncColor:Q.get("syncColor")||0,isLightCompression:Q.get("isLightCompression")||0}}},DxLightDashboardApplyProfile=e=>{const r={dxLightCaptureInterval:50,dxLightSamplingRate:${samplingRate},fpsOptimization:1};return Object.keys(r).forEach((e=>Q.set(e,r[e]))),ve&&(Pe(),setTimeout(Re,250)),DxLightDashboardStatus()},DxLightDashboardSetSyncRunning=e=>{const t=!!e,r=O.getMonitors(),n=r[0]&&r[0].displayId,i=(Q.get("devices")||[]).map(((e,r)=>0===r?{...e,isSyncScreen:t,isSwitchOn:!0,syncMode:0,displayId:e.displayId||n||""}:{...e,isSyncScreen:!1}));return Q.set("devices",i),t?Re():Pe(),DxLightDashboardStatus()};`,
       "dashboard runtime status helpers",
+    );
+  }
+
+  next = next.replace(
+    /brightnessGain:Oe\.native&&Oe\.native\.brightnessGain\|\|[0-9.]+/g,
+    `brightnessGain:Oe.native&&Oe.native.brightnessGain||${brightnessGain}`,
+  );
+  if (!next.includes("brightnessGain:Oe.native&&Oe.native.brightnessGain")) {
+    next = next.replace(
+      /duplicateSuppression:!0,/g,
+      `duplicateSuppression:!0,brightnessGain:Oe.native&&Oe.native.brightnessGain||${brightnessGain},`,
     );
   }
 
@@ -453,6 +474,8 @@ function verifyExtractedApp(directory) {
   const main = fs.readFileSync(path.join(directory, ".webpack", "main", "index.js"), "utf8");
   const worker = fs.readFileSync(path.join(directory, ".webpack", "main", "611cf1f512da07cc30d9.js"), "utf8");
   const coastingHelper = fs.readFileSync(path.join(directory, ".webpack", "main", "dx-light-frame-coasting.cjs"), "utf8");
+  const nativeRecoveryHelper = fs.readFileSync(path.join(directory, ".webpack", "main", "dx-light-native-recovery.cjs"), "utf8");
+  const protectedMediaGuard = fs.readFileSync(path.join(directory, ".webpack", "main", "dx-light-protected-media-guard.cjs"), "utf8");
   const preload = fs.readFileSync(path.join(directory, ".webpack", "renderer", "main_window", "preload.js"), "utf8");
   const html = fs.readFileSync(path.join(directory, ".webpack", "renderer", "main_window", "index.html"), "utf8");
 
@@ -487,6 +510,7 @@ function verifyExtractedApp(directory) {
     [main, "coastingActive"],
     [main, "captureDegraded"],
     [main, "nativeCooldownMs"],
+    [main, "brightnessGain:Oe.native&&Oe.native.brightnessGain"],
     [main, "dxLightSyncDashboard:status"],
     [main, "width:1120,height:760"],
     [main, "De.setResizable(!0)"],
@@ -497,13 +521,27 @@ function verifyExtractedApp(directory) {
     [worker, "scheduleNativeSamplerRestart"],
     [worker, "enterNativeCooldown"],
     [worker, "DX_LIGHT_NATIVE_RECOVERY_COOLDOWN_MS"],
+    [worker, "DX_LIGHT_PROTECTED_CONTENT_COOLDOWN_MS"],
+    [worker, "DX_LIGHT_UNSTABLE_SESSION_COOLDOWN_MS"],
+    [worker, "createNativeRecoveryPolicy"],
+    [worker, "detectProtectedMediaOnDisplay"],
+    [worker, "DX_LIGHT_PROTECTED_MEDIA_PREFLIGHT_RECHECK_MS"],
+    [worker, "protectedMediaPreflight"],
     [worker, "coastingActive"],
     [worker, "captureDegraded"],
     [worker, "nativeCooldownMs"],
+    [worker, "DX_LIGHT_OUTPUT_BRIGHTNESS_GAIN"],
+    [worker, "boostFrameBrightness"],
     [worker, "startSequentialEdgeCapture"],
     [worker, "displayActive: true"],
     [worker, "native ready timeout"],
     [worker, "parentPort.postMessage"],
+    [nativeRecoveryHelper, "createNativeRecoveryPolicy"],
+    [nativeRecoveryHelper, "unstable DXGI duplication session"],
+    [nativeRecoveryHelper, "protectedContentCooldownMs"],
+    [protectedMediaGuard, "detectProtectedMediaOnDisplay"],
+    [protectedMediaGuard, "protectedMediaMatchesDisplay"],
+    [protectedMediaGuard, "DxLightWindowApi"],
     [coastingHelper, "createFrameCoaster"],
     [coastingHelper, "isProtectedCaptureReason"],
     [coastingHelper, "shouldCoastCaptureFrame"],
@@ -523,6 +561,7 @@ function verifyExtractedApp(directory) {
     ["main", main],
     ["worker", worker],
     ["coasting-helper", coastingHelper],
+    ["native-recovery-helper", nativeRecoveryHelper],
     ["preload", preload],
     ["html", html],
   ];
@@ -534,7 +573,6 @@ function verifyExtractedApp(directory) {
     "Netflix",
     "넷플릭스",
     "media-context",
-    "protectedLikely",
   ];
 
   for (const [label, content] of absentContents) {
@@ -615,6 +653,14 @@ function numberFromEnv(name, fallback, min, max) {
     throw new Error(`Invalid ${name}: ${value}`);
   }
   return value;
+}
+
+function decimalFromEnv(name, fallback, min, max) {
+  const value = Number(process.env[name] || fallback);
+  if (!Number.isFinite(value) || value < min || value > max) {
+    throw new Error(`Invalid ${name}: ${value}`);
+  }
+  return Math.round(value * 100) / 100;
 }
 
 function replaceOnce(source, pattern, replacement, label) {

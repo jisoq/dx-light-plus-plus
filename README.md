@@ -10,7 +10,7 @@ The repository name recommended for GitHub is `dx-light-plus-plus`; the project 
 - Samples only the LED-relevant top, left, and right edges for 3-edge monitor backlight layouts.
 - Detects 16:9 content inside a 21:9 monitor and samples the active video border instead of black pillarbox bars.
 - Keeps the previous LED frame on static screens when Desktop Duplication reports that no new frame is available.
-- Locks sync brightness to maximum during screen sync.
+- Locks sync brightness to maximum during screen sync and can apply an optional RGB output gain.
 - Adds a Korean sync-focused dashboard with runtime, capture, and diagnostic status.
 - Falls back to the original region-capture path if the native sidecar cannot start.
 
@@ -56,6 +56,15 @@ npm run dxlight:verify
 ```
 
 `npm run dxlight:patch:restart` stops DX Light, patches the local installation under `vendor-patched/DX Light`, deploys the locally built native sampler, verifies patch markers, and starts DX Light again.
+
+The RGB output gain defaults to `1.0` until the continuous-use hardware headroom is known. It can be tuned before patching or before launching the patched app:
+
+```powershell
+$env:DX_LIGHT_OUTPUT_BRIGHTNESS_GAIN = "1.35"
+npm run dxlight:patch:restart
+```
+
+Supported values are `1.0` through `2.0`; values above the LED byte range clamp at `255`.
 
 ## Performance Summary
 

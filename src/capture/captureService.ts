@@ -1,4 +1,5 @@
 import { averageDomainColor, combineSampleResults, percentDomainToPixels } from '../domain/sampling';
+import { boostRgbColor } from '../domain/brightness';
 import { createOrderedSamplingRegions, mergeAdjacentSections, sectionColorAverage, type LedLayoutConfig } from '../domain/ledLayout';
 import { percentDomainToFramePixels } from '../domain/samplingFrame';
 import { ledCellDomainFor, ledReadbackSizeFor } from './ledReadback';
@@ -121,7 +122,7 @@ export class ScreenCaptureService {
         sections.push({
           start: ledIndex,
           end: ledIndex,
-          color: sample.color
+          color: boostRgbColor(sample.color)
         });
         sampledPixels += sample.sampledPixels;
         ledIndex += 1;
