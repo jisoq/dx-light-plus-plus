@@ -12,10 +12,10 @@ function createNativeRecoveryPolicy(options = {}) {
   );
   const unstableSessionCooldownMs = Math.max(
     recoveryCooldownMs,
-    positiveInteger(options.unstableSessionCooldownMs, 600000),
+    positiveInteger(options.unstableSessionCooldownMs, 120000),
   );
   const sessionLossWindowMs = positiveInteger(options.sessionLossWindowMs, 60000);
-  const sessionLossThreshold = positiveInteger(options.sessionLossThreshold, 1);
+  const sessionLossThreshold = positiveInteger(options.sessionLossThreshold, 3);
   const sessionLossEvents = [];
 
   function classifyFailure(reason, nowMs = Date.now()) {

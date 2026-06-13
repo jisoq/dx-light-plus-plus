@@ -7,6 +7,19 @@ const {
 } = require("./dx-light-native-recovery.cjs");
 
 describe("dx light native recovery policy", () => {
+  it("keeps the default isolated duplication loss on the restart path", () => {
+    const policy = createNativeRecoveryPolicy({
+      isDuplicationSessionLossReason: (reason) => /DXGI_ERROR_ACCESS_LOST/.test(reason),
+      isProtectedCaptureReason: (reason) => /E_ACCESSDENIED/.test(reason),
+    });
+
+    expect(policy.classifyFailure("AcquireNextFrame failed: DXGI_ERROR_ACCESS_LOST", 0)).toMatchObject({
+      action: "restart",
+      cooldownMs: 0,
+      sessionLossCount: 1,
+    });
+  });
+
   it("sends protected capture failures directly to a long cooldown", () => {
     const policy = createPolicy();
 

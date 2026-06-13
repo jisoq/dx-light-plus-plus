@@ -163,17 +163,26 @@ function parseProcessTitleWindows(raw) {
 }
 
 function mergeWindows(left, right) {
-  const merged = [];
+  const merged = [...left];
   const seen = new Set();
-  for (const window of [...left, ...right]) {
-    const key = `${window.pid || 0}:${window.processName || ""}:${window.title || ""}:${window.left ?? ""}:${window.top ?? ""}:${window.right ?? ""}:${window.bottom ?? ""}`;
-    if (seen.has(key)) {
+
+  for (const window of left) {
+    seen.add(windowIdentity(window));
+  }
+
+  for (const window of right) {
+    const identity = windowIdentity(window);
+    if (seen.has(identity)) {
       continue;
     }
-    seen.add(key);
+    seen.add(identity);
     merged.push(window);
   }
   return merged;
+}
+
+function windowIdentity(window) {
+  return `${window && window.pid || 0}:${String(window && window.processName || "").toLowerCase()}:${window && window.title || ""}`;
 }
 
 function windowsScript() {

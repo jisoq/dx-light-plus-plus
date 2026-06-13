@@ -47,13 +47,13 @@ const NATIVE_PROTECTED_CONTENT_COOLDOWN_MS = Math.max(
 );
 const NATIVE_UNSTABLE_SESSION_COOLDOWN_MS = Math.max(
   NATIVE_RECOVERY_COOLDOWN_MS,
-  Math.round(clampNumber(Number(process.env.DX_LIGHT_UNSTABLE_SESSION_COOLDOWN_MS || 600000), 1000, 3600000, 600000)),
+  Math.round(clampNumber(Number(process.env.DX_LIGHT_UNSTABLE_SESSION_COOLDOWN_MS || 120000), 1000, 3600000, 120000)),
 );
 const NATIVE_SESSION_LOSS_WINDOW_MS = Math.round(
   clampNumber(Number(process.env.DX_LIGHT_SESSION_LOSS_WINDOW_MS || 60000), 1000, 600000, 60000),
 );
 const NATIVE_SESSION_LOSS_THRESHOLD = Math.round(
-  clampNumber(Number(process.env.DX_LIGHT_SESSION_LOSS_THRESHOLD || 1), 1, 20, 1),
+  clampNumber(Number(process.env.DX_LIGHT_SESSION_LOSS_THRESHOLD || 3), 1, 20, 3),
 );
 const PROTECTED_MEDIA_PREFLIGHT_HOLD_MS = Math.max(
   NATIVE_PROTECTED_CONTENT_COOLDOWN_MS,
@@ -730,12 +730,7 @@ function startNativeBorderSampler() {
         ? `native sampler did not produce a frame: ${stderr.trim()}`
         : "native sampler did not produce a frame";
       logNativeSampler(`native ready timeout reason=${reason}`);
-      restartScheduled = true;
-      enterNativeCooldown(reason, child, NATIVE_PROTECTED_CONTENT_COOLDOWN_MS, {
-        nativeReadyTimeout: true,
-        protectedContentCooldown: true,
-        protectedContentCooldownMs: NATIVE_PROTECTED_CONTENT_COOLDOWN_MS,
-      });
+      requestRestart(reason, true);
     }
   }, Math.max(1500, finalSyncSpeed * 10));
 

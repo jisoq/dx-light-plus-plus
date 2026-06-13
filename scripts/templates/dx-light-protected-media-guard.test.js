@@ -112,4 +112,31 @@ describe("dx light protected media guard", () => {
       { processName: "msedge", pid: 2, title: "넷플릭스 - 개인 - Microsoft Edge" },
     ])).toHaveLength(2);
   });
+
+  it("keeps bounded window data instead of adding a duplicate unbounded fallback", () => {
+    const merged = mergeWindows([
+      {
+        processName: "msedge",
+        pid: 2,
+        title: "Netflix - Microsoft Edge",
+        left: 5200,
+        top: 0,
+        right: 7000,
+        bottom: 1200,
+      },
+    ], [
+      { processName: "msedge", pid: 2, title: "Netflix - Microsoft Edge" },
+    ]);
+
+    expect(merged).toEqual([{
+      processName: "msedge",
+      pid: 2,
+      title: "Netflix - Microsoft Edge",
+      left: 5200,
+      top: 0,
+      right: 7000,
+      bottom: 1200,
+    }]);
+    expect(merged.filter((window) => protectedMediaMatchesDisplay(window, display))).toEqual([]);
+  });
 });
